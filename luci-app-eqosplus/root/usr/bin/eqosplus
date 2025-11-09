@@ -117,21 +117,21 @@ start_network() {
 	# Initialize firewall rules
 	if [ -n "$nftables_ver" ]; then
 		$nft add table inet ${NAME}_${network}
-		$nft add chain inet ${NAME}_${network} mark_traffic { type filter hook postrouting priority -150 \; }
+		$nft add chain inet ${NAME}_${network} mark_traffic { type filter hook forward priority -150 \; }
 	fi
 
 	# Initialize iptables rules (IPv4)
 	if [ -n "$iptables_ipv4_ver" ]; then
 		$iptables -t mangle -N ${NAME}_${network}_mark
 		$iptables -t mangle -F ${NAME}_${network}_mark
-		$iptables -t mangle -A POSTROUTING -j ${NAME}_${network}_mark
+		$iptables -t mangle -A FORWARD -j ${NAME}_${network}_mark
 	fi
 
 	# Initialize iptables rules (IPv6)
 	if [ -n "$iptables_ipv6_ver" ]; then
 		$ip6tables -t mangle -N ${NAME}_${network}_mark
 		$ip6tables -t mangle -F ${NAME}_${network}_mark
-		$ip6tables -t mangle -A POSTROUTING -j ${NAME}_${network}_mark
+		$ip6tables -t mangle -A FORWARD -j ${NAME}_${network}_mark
 	fi
 
 	echo "${network}" >> $NETWORKS ;  cat $NETWORKS | sort | uniq  > $TMPID ;cat $TMPID >$NETWORKS ;rm -rf $TMPID

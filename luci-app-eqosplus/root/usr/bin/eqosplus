@@ -9,39 +9,12 @@ NAME=eqosplus
 IDLIST="/var/$NAME.idlist"
 TMPID="/var/$NAME.tmpid"
 NETWORKS="/var/$NAME.networks"
-bin_nft=$(which nft)
 bin_iptables=$(which iptables)   
 bin_ip6tables=$(which ip6tables)
 bin_tc=$(which tc)
 bin_ip=$(which ip)
 # Uncomment this to debug commands
 DEBUG=0
-
-# Firewall type detection
-nftables_ver=""
-iptables_ver=""
-iptables_ipv4_ver=""
-iptables_ipv6_ver=""
-
-# Detect nftables
-if command -v nft >/dev/null; then
-    nftables_ver="true"
-fi
-
-# Detect iptables (IPv4)
-if command -v iptables >/dev/null; then
-    iptables_ipv4_ver="true"
-fi
-
-# Detect iptables (IPv6)
-if command -v ip6tables >/dev/null; then
-    iptables_ipv6_ver="true"
-fi
-
-# Set iptables_ver if either IPv4 or IPv6 is available
-if [ -n "$iptables_ipv4_ver" ] || [ -n "$iptables_ipv6_ver" ]; then
-    iptables_ver="true"
-fi
 ## End
 
 touch $IDLIST
@@ -55,11 +28,6 @@ dbg_iptables() {
 dbg_ip6tables() {
 	[ "${DEBUG:-0}" -eq 0 ] || echo "DEBUG: ip6tables $*"
 	$bin_ip6tables "$*" 
-}
-
-dbg_nft() {
-	[ "${DEBUG:-0}" -eq 0 ] || echo "DEBUG: nft $*"
-	$bin_nft "$@"
 }
 
 dbg_tc() {
@@ -82,7 +50,6 @@ iptables="dbg_iptables"
 ip6tables="dbg_ip6tables"
 tc="dbg_tc"
 ip="dbg_ip"
-nft="dbg_nft"
 ipt(){
 	$iptables $*
 	$ip6tables $*
@@ -98,8 +65,6 @@ start_network() {
 	dev=$(uci get network.$network.device)
 	lanipaddr=$(uci -q get network.$network.ipaddr 2>/dev/null | awk -F '.' '{print $1"."$2"."$3".0/24"}')
 
-	# Kernel modules are loaded automatically by OpenWrt package dependencies
-
 	$ip link add dev ${dev}_ifb name ${dev}_ifb type ifb
 	$ip link set dev ${dev}_ifb up
 	$tc qdisc add dev ${dev} root handle 1:0 htb default 1
@@ -113,26 +78,6 @@ start_network() {
 
 	$tc qdisc add dev ${dev} ingress
 	$tc filter add dev ${dev} parent ffff: protocol all prio 2 u32 match u32 0 0 flowid 1:1 action mirred egress redirect dev ${dev}_ifb
-
-	# Initialize firewall rules
-	if [ -n "$nftables_ver" ]; then
-		$nft add table inet ${NAME}_${network}
-		$nft add chain inet ${NAME}_${network} mark_traffic { type filter hook postrouting priority -150 \; }
-	fi
-
-	# Initialize iptables rules (IPv4)
-	if [ -n "$iptables_ipv4_ver" ]; then
-		$iptables -t mangle -N ${NAME}_${network}_mark
-		$iptables -t mangle -F ${NAME}_${network}_mark
-		$iptables -t mangle -A POSTROUTING -j ${NAME}_${network}_mark
-	fi
-
-	# Initialize iptables rules (IPv6)
-	if [ -n "$iptables_ipv6_ver" ]; then
-		$ip6tables -t mangle -N ${NAME}_${network}_mark
-		$ip6tables -t mangle -F ${NAME}_${network}_mark
-		$ip6tables -t mangle -A POSTROUTING -j ${NAME}_${network}_mark
-	fi
 
 	echo "${network}" >> $NETWORKS ;  cat $NETWORKS | sort | uniq  > $TMPID ;cat $TMPID >$NETWORKS ;rm -rf $TMPID
 }
@@ -151,24 +96,6 @@ stop_network() {
 	$tc qdisc del dev ${dev}_ifb root 2>/dev/null
 
 	$ip link del dev ${dev}_ifb 2>/dev/null
-
-	# Clean up firewall rules
-	if [ -n "$nftables_ver" ]; then
-		$nft flush table inet ${NAME}_${network} 2>/dev/null
-		$nft delete table inet ${NAME}_${network} 2>/dev/null
-	fi
-
-	# Clean up iptables rules (IPv4)
-	if [ -n "$iptables_ipv4_ver" ]; then
-		$iptables -t mangle -F ${NAME}_${network}_mark 2>/dev/null
-		$iptables -t mangle -X ${NAME}_${network}_mark 2>/dev/null
-	fi
-
-	# Clean up iptables rules (IPv6)
-	if [ -n "$iptables_ipv6_ver" ]; then
-		$ip6tables -t mangle -F ${NAME}_${network}_mark 2>/dev/null
-		$ip6tables -t mangle -X ${NAME}_${network}_mark 2>/dev/null
-	fi
 
 	sed -i "/$network/d" $NETWORKS >/dev/null 2>&1
 }
@@ -233,6 +160,7 @@ stop_qos() {
 }
 
 init_qosplus() {
+	insmod sch_htb 2> /dev/null
 	sync_networks
 }
 
@@ -270,29 +198,6 @@ del_id() {
 	$tc filter del dev ${dev} pref $id 2>/dev/null
 	$tc filter del dev ${dev} pref $(($id + 1)) 2>/dev/null
 
-	# Clean up firewall rules
-	if is_macaddr "$device"; then
-		if [ -n "$nftables_ver" ]; then
-			$nft delete rule inet ${NAME}_${network} mark_traffic ether saddr $device counter 2>/dev/null
-		fi
-		if [ -n "$iptables_ipv4_ver" ]; then
-			$iptables -t mangle -D ${NAME}_${network}_mark -m mac --mac-source $device -j MARK --set-mark $id 2>/dev/null
-		fi
-		if [ -n "$iptables_ipv6_ver" ]; then
-			$ip6tables -t mangle -D ${NAME}_${network}_mark -m mac --mac-source $device -j MARK --set-mark $id 2>/dev/null
-		fi
-	else
-		if [ -n "$nftables_ver" ]; then
-			$nft delete rule inet ${NAME}_${network} mark_traffic ip saddr $device counter 2>/dev/null
-		fi
-		if [ -n "$iptables_ipv4_ver" ]; then
-			$iptables -t mangle -D ${NAME}_${network}_mark -s $device -j MARK --set-mark $id 2>/dev/null
-		fi
-		if [ -n "$iptables_ipv6_ver" ]; then
-			$ip6tables -t mangle -D ${NAME}_${network}_mark -s $device -j MARK --set-mark $id 2>/dev/null
-		fi
-	fi
-
 	escaped_id=$(echo "$1" | sed 's/\[/\\[/g; s/\]/\\]/g')
 	sed -i "/$escaped_id/d" $IDLIST >/dev/null 2>&1
 }
@@ -310,28 +215,11 @@ add_mac() {
 
 	[ "${DEBUG:-0}" -eq 0 ] || echo "D: add_mac $@ --id:$id --mac:$mac M012--$M0-$M1-$M2"
 	if [ "$UL" -gt 0 ]; then
-		# Add firewall marking rules
-		if [ -n "$nftables_ver" ]; then
-			$nft add rule inet ${NAME}_${network} mark_traffic ether saddr $mac counter meta mark set $id
-		fi
-		if [ -n "$iptables_ipv4_ver" ]; then
-			$iptables -t mangle -A ${NAME}_${network}_mark -m mac --mac-source $mac -j MARK --set-mark $id
-		fi
-		if [ -n "$iptables_ipv6_ver" ]; then
-			$ip6tables -t mangle -A ${NAME}_${network}_mark -m mac --mac-source $mac -j MARK --set-mark $id
-		fi
-		
 		$tc class add dev ${dev}_ifb parent 1:1 classid 1:$id htb rate "$UL"kbit ceil "$UL"kbit prio $id quantum 1500
 		$tc qdisc add dev ${dev}_ifb parent 1:"$id" handle "$id": sfq perturb 1
-		
-		# Primary: Use firewall mark for more precise control (higher priority)
-		if [ -n "$nftables_ver" ] || [ -n "$iptables_ver" ]; then
-			$tc filter add dev ${dev}_ifb parent 1: protocol ip prio $id handle $id fw flowid 1:$id
-		else
-			# Fallback: Use U32 matching when firewall is not available
-			$tc filter add dev ${dev}_ifb parent 1: protocol ip prio $id u32 match u16 0x0800 0xFFFF at -2 match u16 0x"${M2}" 0xFFFF at -4 match u32 0x"${M0}${M1}" 0xFFFFFFFF at -8 flowid 1:$id
-			$tc filter add dev ${dev}_ifb parent 1: protocol ipv6 prio $(($id + 1)) u32 match u16 0x86DD 0xFFFF at -2 match u16 0x"${M2}" 0xFFFF at -4 match u32 0x"${M0}${M1}" 0xFFFFFFFF at -8 flowid 1:$id
-		fi
+		# IPv4 and IPv6 filters
+		$tc filter add dev ${dev}_ifb parent 1: protocol ip prio $id u32 match u16 0x0800 0xFFFF at -2 match u16 0x"${M2}" 0xFFFF at -4 match u32 0x"${M0}${M1}" 0xFFFFFFFF at -8 flowid 1:$id
+		$tc filter add dev ${dev}_ifb parent 1: protocol ipv6 prio $(($id + 1)) u32 match u16 0x86DD 0xFFFF at -2 match u16 0x"${M2}" 0xFFFF at -4 match u32 0x"${M0}${M1}" 0xFFFFFFFF at -8 flowid 1:$id
 	elif [ "$UL" -eq 0 ]; then
 		$tc filter add dev ${dev}_ifb parent 1: protocol ip prio $id u32 match u16 0x0800 0xFFFF at -2 match u16 0x"${M2}" 0xFFFF at -4 match u32 0x"${M0}${M1}" 0xFFFFFFFF at -8 flowid 1:1
 		$tc filter add dev ${dev}_ifb parent 1: protocol ipv6 prio $(($id + 1)) u32 match u16 0x86DD 0xFFFF at -2 match u16 0x"${M2}" 0xFFFF at -4 match u32 0x"${M0}${M1}" 0xFFFFFFFF at -8 flowid 1:1
@@ -362,27 +250,9 @@ add_ip() {
 	Z=`echo $ip |awk -F '[/]' '{print $2}' `
 	[ -n "$Z" ] && ip=`echo $ip |awk -F '[/]' '{print $1}' `|| Z=32
 	if [ "$UL" -gt 0 ]; then
-		# Add firewall marking rules
-		if [ -n "$nftables_ver" ]; then
-			$nft add rule inet ${NAME}_${network} mark_traffic ip saddr $ip/$Z counter meta mark set $id
-		fi
-		if [ -n "$iptables_ipv4_ver" ]; then
-			$iptables -t mangle -A ${NAME}_${network}_mark -s $ip/$Z -j MARK --set-mark $id
-		fi
-		if [ -n "$iptables_ipv6_ver" ]; then
-			$ip6tables -t mangle -A ${NAME}_${network}_mark -s $ip/$Z -j MARK --set-mark $id
-		fi
-		
 		$tc class add dev ${dev}_ifb parent 1:1 classid 1:$id htb rate "$UL"kbit ceil "$UL"kbit prio $id quantum 1500
 		$tc qdisc add dev ${dev}_ifb parent 1:"$id" handle "$id": sfq perturb 1
-		
-		# Primary: Use firewall mark for more precise control (higher priority)
-		if [ -n "$nftables_ver" ] || [ -n "$iptables_ver" ]; then
-			$tc filter add dev ${dev}_ifb parent 1: protocol ip prio $id handle $id fw flowid 1:$id
-		else
-			# Fallback: Use U32 matching when firewall is not available
-			$tc filter add dev ${dev}_ifb parent 1:0 prio $id protocol ip u32 match ip src "$ip"/"$Z" classid 1:$id
-		fi
+		$tc filter add dev ${dev}_ifb parent 1:0 prio $id protocol ip u32 match ip src "$ip"/"$Z" classid 1:$id
 	elif [ "$UL" -eq 0 ]; then
 		$tc filter add dev ${dev}_ifb parent 1:0 prio $id protocol ip u32 match ip src "$ip"/"$Z" classid 1:1
 	fi
@@ -443,21 +313,6 @@ case "$crrun" in
 			echo "# filter #"
 			tc -s filter show dev ${dev}_ifb root
 			tc -s filter show dev ${dev}_ifb parent 1:
-			if [ -n "$nftables_ver" ]; then
-				echo "### NFTables Rules for $network ###"
-				nft list table inet ${NAME}_${network} 2>/dev/null
-			fi
-			if [ -n "$iptables_ipv4_ver" ] || [ -n "$iptables_ipv6_ver" ]; then
-				echo "### IPTables Rules for $network ###"
-				if [ -n "$iptables_ipv4_ver" ]; then
-					echo "IPv4 rules:"
-					iptables -t mangle -L ${NAME}_${network}_mark -n 2>/dev/null
-				fi
-				if [ -n "$iptables_ipv6_ver" ]; then
-					echo "IPv6 rules:"
-					ip6tables -t mangle -L ${NAME}_${network}_mark -n 2>/dev/null
-				fi
-			fi
 		done
 	;;
 

@@ -6,79 +6,6 @@ local interfaces = nw:get_interfaces()
 local ipc = require "luci.ip"
 local a, t, e
 
--- Enhanced device discovery function
-local function get_devices(interface_name)
-    local devices = {}
-    local seen_ips = {}
-    local ubus = require "ubus"
-    
-    local function get_hostname(ip)
-        local f = io.popen("nslookup "..ip.." 2>/dev/null | grep 'name =' | cut -d'=' -f2 | sed 's/\\.$//'")
-        if f then
-            local name = f:read("*l")
-            f:close()
-            if name and name ~= "" then
-                return name:match("^%s*(.-)%s*$")
-            end
-        end
-        local leases_file = io.open("/tmp/dhcp.leases", "r")
-        if leases_file then
-            for line in leases_file:lines() do
-                local mac, ip_lease, _, hostname = line:match("^(%S+)%s+(%S+)%s+(%S+)%s+(%S+)")
-                if ip_lease == ip and hostname ~= "*" then
-                    leases_file:close()
-                    return hostname
-                end
-            end
-            leases_file:close()
-        end
-        return "unknown"
-    end
-    
-    -- Get devices from DHCP leases
-    local conn = ubus.connect()
-    if conn then
-        local leases = conn:call("dhcp", "ipv4leases", {}) or {}
-        for _, lease in ipairs(leases) do
-            if lease.ipaddr and lease.mac then
-                local hostname = lease.hostname or get_hostname(lease.ipaddr)
-                devices[#devices+1] = {
-                    ip = lease.ipaddr,
-                    mac = lease.mac:upper(),
-                    hostname = hostname,
-                    display = string.format("%s (%s) - %s", lease.ipaddr, lease.mac:upper(), hostname)
-                }
-                seen_ips[lease.ipaddr] = true
-            end
-        end
-        conn:close()
-    end
-    
-    -- Get devices from ARP table
-    local arp_cmd = io.popen("ip -4 neigh show dev "..interface_name.." 2>/dev/null")
-    if arp_cmd then
-        for line in arp_cmd:lines() do
-            local ip_addr, mac = line:match("^(%S+)%s+.+%s+(%S+)%s+")
-            if ip_addr and mac and mac ~= "00:00:00:00:00:00" and not seen_ips[ip_addr] then
-                mac = mac:upper()
-                local hostname = get_hostname(ip_addr)
-                devices[#devices+1] = {
-                    ip = ip_addr,
-                    mac = mac,
-                    hostname = hostname,
-                    display = string.format("%s (%s) - %s", ip_addr, mac, hostname)
-                }
-                seen_ips[ip_addr] = true
-            end
-        end
-        arp_cmd:close()
-    end
-    
-    -- Sort devices by IP address
-    table.sort(devices, function(a, b) return a.ip < b.ip end)
-    return devices
-end
-
 function validate_time(self, value, section)
 	local hh, mm, ss
 	hh, mm, ss = string.match (value, "^(%d?%d):(%d%d)$")
@@ -125,16 +52,6 @@ for _, iface in ipairs(interfaces) do
 		e.size = 4
 
 		ip = t:option(Value, "mac", translate("IP/MAC"))
-		ip.size = 12
-		
-		-- Use enhanced device discovery
-		local devices = get_devices(name)
-		for _, dev in ipairs(devices) do
-			ip:value(dev.ip, dev.display)
-			ip:value(dev.mac, dev.display)
-		end
-		
-		-- Fallback to original method for compatibility
 		ipc.neighbors({family = 4, dev = name}, function(n)
 			if n.mac and n.dest then
 				ip:value(n.dest:string(), "%s (%s)" %{ n.dest:string(), n.mac })

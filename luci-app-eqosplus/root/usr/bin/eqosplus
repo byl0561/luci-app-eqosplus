@@ -50,16 +50,16 @@ touch $NETWORKS
 # Debug functions - echo + run
 dbg_iptables() {
 	[ "${DEBUG:-0}" -eq 0 ] || echo "DEBUG: iptables $*"
-	$bin_iptables $* 
+	$bin_iptables "$*" 
 }
 dbg_ip6tables() {
 	[ "${DEBUG:-0}" -eq 0 ] || echo "DEBUG: ip6tables $*"
-	$bin_ip6tables $* 
+	$bin_ip6tables "$*" 
 }
 
 dbg_nft() {
 	[ "${DEBUG:-0}" -eq 0 ] || echo "DEBUG: nft $*"
-	$bin_nft $*
+	$bin_nft "$@"
 }
 
 dbg_tc() {

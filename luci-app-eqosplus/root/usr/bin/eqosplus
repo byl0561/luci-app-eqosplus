@@ -304,6 +304,7 @@ add_mac() {
 	network=`echo $1 | sed 's/\[.*\]//' `
 	dev=$(uci get network.$network.device)
 	id=$(cal_uuid $1)
+	hex_id=$(printf "0x%x" $id)
 	M0=$(echo $mac | cut -d : -f 1)$(echo $mac | cut -d : -f 2)
 	M1=$(echo $mac | cut -d : -f 3)$(echo $mac | cut -d : -f 4)
 	M2=$(echo $mac | cut -d : -f 5)$(echo $mac | cut -d : -f 6)
@@ -312,13 +313,13 @@ add_mac() {
 	if [ "$UL" -gt 0 ]; then
 		# Add firewall marking rules
 		if [ -n "$nftables_ver" ]; then
-			$nft add rule inet ${NAME}_${network} mark_traffic ether saddr $mac counter meta mark set $id
+			$nft add rule inet ${NAME}_${network} mark_traffic ether saddr $mac counter meta mark set $hex_id
 		fi
 		if [ -n "$iptables_ipv4_ver" ]; then
-			$iptables -t mangle -A ${NAME}_${network}_mark -m mac --mac-source $mac -j MARK --set-mark $id
+			$iptables -t mangle -A ${NAME}_${network}_mark -m mac --mac-source $mac -j MARK --set-mark $hex_id
 		fi
 		if [ -n "$iptables_ipv6_ver" ]; then
-			$ip6tables -t mangle -A ${NAME}_${network}_mark -m mac --mac-source $mac -j MARK --set-mark $id
+			$ip6tables -t mangle -A ${NAME}_${network}_mark -m mac --mac-source $mac -j MARK --set-mark $hex_id
 		fi
 		
 		$tc class add dev ${dev}_ifb parent 1:1 classid 1:$id htb rate "$UL"kbit ceil "$UL"kbit prio $id quantum 1500
@@ -326,7 +327,8 @@ add_mac() {
 		
 		# Primary: Use firewall mark for more precise control (higher priority)
 		if [ -n "$nftables_ver" ] || [ -n "$iptables_ver" ]; then
-			$tc filter add dev ${dev}_ifb parent 1: protocol ip prio $id handle $id fw flowid 1:$id
+			$tc filter add dev ${dev}_ifb parent 1: protocol ip prio $id handle $hex_id fw flowid 1:$id
+			$tc filter add dev ${dev}_ifb parent 1: protocol ipv6 prio $(($id + 1)) handle $hex_id fw flowid 1:$id
 		else
 			# Fallback: Use U32 matching when firewall is not available
 			$tc filter add dev ${dev}_ifb parent 1: protocol ip prio $id u32 match u16 0x0800 0xFFFF at -2 match u16 0x"${M2}" 0xFFFF at -4 match u32 0x"${M0}${M1}" 0xFFFFFFFF at -8 flowid 1:$id
@@ -357,6 +359,7 @@ add_ip() {
 	network=`echo $1 | sed 's/\[.*\]//' `
 	dev=$(uci get network.$network.device)
 	id=$(cal_uuid $1)
+	hex_id=$(printf "0x%x" $id)
 
 	[ "${DEBUG:-0}" -eq 0 ] || echo "D: add_ip $@ --$id --$ip"
 	Z=`echo $ip |awk -F '[/]' '{print $2}' `
@@ -364,13 +367,13 @@ add_ip() {
 	if [ "$UL" -gt 0 ]; then
 		# Add firewall marking rules
 		if [ -n "$nftables_ver" ]; then
-			$nft add rule inet ${NAME}_${network} mark_traffic ip saddr $ip/$Z counter meta mark set $id
+			$nft add rule inet ${NAME}_${network} mark_traffic ip saddr $ip/$Z counter meta mark set $hex_id
 		fi
 		if [ -n "$iptables_ipv4_ver" ]; then
-			$iptables -t mangle -A ${NAME}_${network}_mark -s $ip/$Z -j MARK --set-mark $id
+			$iptables -t mangle -A ${NAME}_${network}_mark -s $ip/$Z -j MARK --set-mark $hex_id
 		fi
 		if [ -n "$iptables_ipv6_ver" ]; then
-			$ip6tables -t mangle -A ${NAME}_${network}_mark -s $ip/$Z -j MARK --set-mark $id
+			$ip6tables -t mangle -A ${NAME}_${network}_mark -s $ip/$Z -j MARK --set-mark $hex_id
 		fi
 		
 		$tc class add dev ${dev}_ifb parent 1:1 classid 1:$id htb rate "$UL"kbit ceil "$UL"kbit prio $id quantum 1500
@@ -378,7 +381,7 @@ add_ip() {
 		
 		# Primary: Use firewall mark for more precise control (higher priority)
 		if [ -n "$nftables_ver" ] || [ -n "$iptables_ver" ]; then
-			$tc filter add dev ${dev}_ifb parent 1: protocol ip prio $id handle $id fw flowid 1:$id
+			$tc filter add dev ${dev}_ifb parent 1: protocol ip prio $id handle $hex_id fw flowid 1:$id
 		else
 			# Fallback: Use U32 matching when firewall is not available
 			$tc filter add dev ${dev}_ifb parent 1:0 prio $id protocol ip u32 match ip src "$ip"/"$Z" classid 1:$id

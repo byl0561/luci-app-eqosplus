@@ -1,4 +1,4 @@
-#!/bin/bash 
+#!/bin/bash
 
 # Copyright (C) 2006 OpenWrt.org
 # Copyright 2022-2025 lava <byl0561@gmail.com>
@@ -9,66 +9,43 @@ NAME=eqosplus
 IDLIST="/var/$NAME.idlist"
 TMPID="/var/$NAME.tmpid"
 NETWORKS="/var/$NAME.networks"
-bin_nft=$(which nft)
-bin_iptables=$(which iptables)   
-bin_ip6tables=$(which ip6tables)
+LOGFILE="/tmp/$NAME.log"
+LOG_LEVEL=$(uci -q get $NAME.@eqosplus[0].log_level 2>/dev/null || echo 0)
 bin_tc=$(which tc)
 bin_ip=$(which ip)
-# Uncomment this to debug commands
-DEBUG=0
-
-# Firewall type detection
-nftables_ver=""
-iptables_ver=""
-iptables_ipv4_ver=""
-iptables_ipv6_ver=""
-
-# Detect nftables
-if command -v nft >/dev/null; then
-    nftables_ver="true"
-fi
-
-# Detect iptables (IPv4)
-if command -v iptables >/dev/null; then
-    iptables_ipv4_ver="true"
-fi
-
-# Detect iptables (IPv6)
-if command -v ip6tables >/dev/null; then
-    iptables_ipv6_ver="true"
-fi
-
-# Set iptables_ver if either IPv4 or IPv6 is available
-if [ -n "$iptables_ipv4_ver" ] || [ -n "$iptables_ipv6_ver" ]; then
-    iptables_ver="true"
-fi
-## End
 
 touch $IDLIST
 touch $NETWORKS
 
-# Debug functions - echo + run
-dbg_iptables() {
-	[ "${DEBUG:-0}" -eq 0 ] || echo "DEBUG: iptables $*"
-	$bin_iptables $* 
-}
-dbg_ip6tables() {
-	[ "${DEBUG:-0}" -eq 0 ] || echo "DEBUG: ip6tables $*"
-	$bin_ip6tables $* 
-}
-
-dbg_nft() {
-	[ "${DEBUG:-0}" -eq 0 ] || echo "DEBUG: nft $*"
-	$bin_nft $*
+# Logging: 0=off, 1=error, 2=info, 3=debug
+log_msg() {
+	local level=$1; shift
+	[ "$LOG_LEVEL" -ge "$level" ] 2>/dev/null || return
+	local tag=""
+	case $level in
+		1) tag="ERROR" ;;
+		2) tag="INFO" ;;
+		3) tag="DEBUG" ;;
+	esac
+	echo "$(date '+%H:%M:%S') [$tag] $*" >> $LOGFILE
+	# Truncate log if > 100KB
+	local size=$(wc -c < "$LOGFILE" 2>/dev/null || echo 0)
+	[ "$size" -gt 102400 ] && tail -c 51200 "$LOGFILE" > "${LOGFILE}.tmp" && mv "${LOGFILE}.tmp" "$LOGFILE"
 }
 
 dbg_tc() {
-	[ "${DEBUG:-0}" -eq 0 ] || echo "DEBUG: tc $*"
+	log_msg 3 "tc $*"
 	$bin_tc $*
+	local ret=$?
+	[ $ret -eq 0 ] || log_msg 1 "tc FAILED (exit=$ret): $*"
+	return $ret
 }
 dbg_ip() {
-	[ "${DEBUG:-0}" -eq 0 ] || echo "DEBUG: ip $*"
+	log_msg 3 "ip $*"
 	$bin_ip $*
+	local ret=$?
+	[ $ret -eq 0 ] || log_msg 1 "ip FAILED (exit=$ret): $*"
+	return $ret
 }
 is_macaddr() {
     if echo "$1" | grep -qE '^([0-9A-Fa-f]{2}[-:]){5}[0-9A-Fa-f]{2}$'; then
@@ -78,61 +55,42 @@ is_macaddr() {
 }
 
 # Default commands
-iptables="dbg_iptables"
-ip6tables="dbg_ip6tables"
 tc="dbg_tc"
 ip="dbg_ip"
-nft="dbg_nft"
-ipt(){
-	$iptables $*
-	$ip6tables $*
-}
-
-iptm(){
-	$iptables "-t mangle $*"
-	$ip6tables "-t mangle $*"
-}
 
 start_network() {
 	network=$1
 	dev=$(uci get network.$network.device)
-	lanipaddr=$(uci -q get network.$network.ipaddr 2>/dev/null | awk -F '.' '{print $1"."$2"."$3".0/24"}')
-
-	# Kernel modules are loaded automatically by OpenWrt package dependencies
+	log_msg 2 "start_network $network dev=$dev"
 
 	$ip link add dev ${dev}_ifb name ${dev}_ifb type ifb
 	$ip link set dev ${dev}_ifb up
 	$tc qdisc add dev ${dev} root handle 1:0 htb default 1
-	$tc class add dev ${dev} parent 1:0 classid 1:1 htb rate 80gbit prio 0 quantum 1500
-	
+	$tc class add dev ${dev} parent 1:0 classid 1:1 htb rate 10gbit prio 0 quantum 1500
+	$tc qdisc add dev ${dev} parent 1:1 fq_codel
+
 	$tc qdisc add dev ${dev}_ifb root handle 1:0 htb default 1
-	$tc class add dev ${dev}_ifb parent 1:0 classid 1:1 htb rate 80gbit prio 0 quantum 1500
-	
-	$tc filter add dev ${dev} parent 1:0 protocol ipv4 prio 1 u32 match ip src "$lanipaddr" match ip dst "$lanipaddr" flowid 1:1
-	$tc filter add dev ${dev}_ifb parent 1:0 protocol ipv4 prio 1 u32 match ip src "$lanipaddr" match ip dst "$lanipaddr" flowid 1:1
+	$tc class add dev ${dev}_ifb parent 1:0 classid 1:1 htb rate 10gbit prio 0 quantum 1500
+	$tc qdisc add dev ${dev}_ifb parent 1:1 fq_codel
+
+	# Bypass LAN-to-LAN traffic: detect all LAN subnets from bridge devices
+	local bypass_prio=1
+	for br in $(ip link show type bridge 2>/dev/null | awk -F: '{print $2}' | tr -d ' '); do
+		for subnet in $(ip -4 -o addr show dev $br 2>/dev/null | awk '{print $4}'); do
+			log_msg 2 "bypass: IPv4 $subnet on $br"
+			$tc filter add dev ${dev} parent 1:0 prio $bypass_prio protocol ip flower src_ip $subnet classid 1:1
+			$tc filter add dev ${dev}_ifb parent 1:0 prio $bypass_prio protocol ip flower dst_ip $subnet classid 1:1
+			bypass_prio=$((bypass_prio + 1))
+		done
+		for subnet in $(ip -6 -o addr show dev $br scope global 2>/dev/null | awk '{print $4}'); do
+			log_msg 2 "bypass: IPv6 $subnet on $br"
+			$tc filter add dev ${dev} parent 1:0 prio $bypass_prio protocol ipv6 flower src_ip $subnet classid 1:1
+			$tc filter add dev ${dev}_ifb parent 1:0 prio $bypass_prio protocol ipv6 flower dst_ip $subnet classid 1:1
+			bypass_prio=$((bypass_prio + 1))
+		done
+	done
 
 	$tc qdisc add dev ${dev} ingress
-	$tc filter add dev ${dev} parent ffff: protocol all prio 2 u32 match u32 0 0 flowid 1:1 action mirred egress redirect dev ${dev}_ifb
-
-	# Initialize firewall rules
-	if [ -n "$nftables_ver" ]; then
-		$nft add table inet ${NAME}_${network}
-		$nft add chain inet ${NAME}_${network} mark_traffic { type filter hook forward priority -150 \; }
-	fi
-
-	# Initialize iptables rules (IPv4)
-	if [ -n "$iptables_ipv4_ver" ]; then
-		$iptables -t mangle -N ${NAME}_${network}_mark
-		$iptables -t mangle -F ${NAME}_${network}_mark
-		$iptables -t mangle -A FORWARD -j ${NAME}_${network}_mark
-	fi
-
-	# Initialize iptables rules (IPv6)
-	if [ -n "$iptables_ipv6_ver" ]; then
-		$ip6tables -t mangle -N ${NAME}_${network}_mark
-		$ip6tables -t mangle -F ${NAME}_${network}_mark
-		$ip6tables -t mangle -A FORWARD -j ${NAME}_${network}_mark
-	fi
 
 	echo "${network}" >> $NETWORKS ;  cat $NETWORKS | sort | uniq  > $TMPID ;cat $TMPID >$NETWORKS ;rm -rf $TMPID
 }
@@ -140,6 +98,7 @@ start_network() {
 stop_network() {
 	network=$1
 	dev=$(uci get network.$network.device)
+	log_msg 2 "stop_network $network dev=$dev"
 
 	$tc filter del dev ${dev} parent ffff: 2>/dev/null
 	$tc qdisc del dev ${dev} ingress 2>/dev/null
@@ -151,24 +110,6 @@ stop_network() {
 	$tc qdisc del dev ${dev}_ifb root 2>/dev/null
 
 	$ip link del dev ${dev}_ifb 2>/dev/null
-
-	# Clean up firewall rules
-	if [ -n "$nftables_ver" ]; then
-		$nft flush table inet ${NAME}_${network} 2>/dev/null
-		$nft delete table inet ${NAME}_${network} 2>/dev/null
-	fi
-
-	# Clean up iptables rules (IPv4)
-	if [ -n "$iptables_ipv4_ver" ]; then
-		$iptables -t mangle -F ${NAME}_${network}_mark 2>/dev/null
-		$iptables -t mangle -X ${NAME}_${network}_mark 2>/dev/null
-	fi
-
-	# Clean up iptables rules (IPv6)
-	if [ -n "$iptables_ipv6_ver" ]; then
-		$ip6tables -t mangle -F ${NAME}_${network}_mark 2>/dev/null
-		$ip6tables -t mangle -X ${NAME}_${network}_mark 2>/dev/null
-	fi
 
 	sed -i "/$network/d" $NETWORKS >/dev/null 2>&1
 }
@@ -258,40 +199,16 @@ del_id() {
 	dev=$(uci get network.$network.device)
 	id=$(cal_uuid $1)
 
-	[ "${DEBUG:-0}" -eq 0 ] || echo "D: del_id $@" "--$id --$device"
+	log_msg 2 "del_id $1 id=$id device=$device dev=$dev"
 	$tc qd del dev ${dev} parent 1:$id  2>/dev/null
 	$tc qd del dev ${dev}_ifb parent 1:$id 2>/dev/null
 
 	$tc class del dev ${dev} parent 1:1 classid 1:$id 2>/dev/null
 	$tc class del dev ${dev}_ifb parent 1:1 classid 1:$id 2>/dev/null
-	
-	$tc filter del dev ${dev}_ifb pref $id 2>/dev/null
-	$tc filter del dev ${dev}_ifb pref $(($id + 1)) 2>/dev/null
-	$tc filter del dev ${dev} pref $id 2>/dev/null
-	$tc filter del dev ${dev} pref $(($id + 1)) 2>/dev/null
 
-	# Clean up firewall rules
-	if is_macaddr "$device"; then
-		if [ -n "$nftables_ver" ]; then
-			$nft delete rule inet ${NAME}_${network} mark_traffic ether saddr $device counter 2>/dev/null
-		fi
-		if [ -n "$iptables_ipv4_ver" ]; then
-			$iptables -t mangle -D ${NAME}_${network}_mark -m mac --mac-source $device -j MARK --set-mark $id 2>/dev/null
-		fi
-		if [ -n "$iptables_ipv6_ver" ]; then
-			$ip6tables -t mangle -D ${NAME}_${network}_mark -m mac --mac-source $device -j MARK --set-mark $id 2>/dev/null
-		fi
-	else
-		if [ -n "$nftables_ver" ]; then
-			$nft delete rule inet ${NAME}_${network} mark_traffic ip saddr $device counter 2>/dev/null
-		fi
-		if [ -n "$iptables_ipv4_ver" ]; then
-			$iptables -t mangle -D ${NAME}_${network}_mark -s $device -j MARK --set-mark $id 2>/dev/null
-		fi
-		if [ -n "$iptables_ipv6_ver" ]; then
-			$ip6tables -t mangle -D ${NAME}_${network}_mark -s $device -j MARK --set-mark $id 2>/dev/null
-		fi
-	fi
+	$tc filter del dev ${dev} parent ffff: prio $id 2>/dev/null
+	$tc filter del dev ${dev}_ifb pref $id 2>/dev/null
+	$tc filter del dev ${dev} pref $id 2>/dev/null
 
 	escaped_id=$(echo "$1" | sed 's/\[/\\[/g; s/\]/\\]/g')
 	sed -i "/$escaped_id/d" $IDLIST >/dev/null 2>&1
@@ -304,49 +221,18 @@ add_mac() {
 	network=`echo $1 | sed 's/\[.*\]//' `
 	dev=$(uci get network.$network.device)
 	id=$(cal_uuid $1)
-	hex_id=$(printf "0x%x" $id)
-	M0=$(echo $mac | cut -d : -f 1)$(echo $mac | cut -d : -f 2)
-	M1=$(echo $mac | cut -d : -f 3)$(echo $mac | cut -d : -f 4)
-	M2=$(echo $mac | cut -d : -f 5)$(echo $mac | cut -d : -f 6)
 
-	[ "${DEBUG:-0}" -eq 0 ] || echo "D: add_mac $@ --id:$id --mac:$mac M012--$M0-$M1-$M2"
+	log_msg 2 "add_mac $1 id=$id mac=$mac UL=${UL}kbit DL=${DL}kbit dev=$dev"
 	if [ "$UL" -gt 0 ]; then
-		# Add firewall marking rules
-		if [ -n "$nftables_ver" ]; then
-			$nft add rule inet ${NAME}_${network} mark_traffic ether saddr $mac counter meta mark set $hex_id
-		fi
-		if [ -n "$iptables_ipv4_ver" ]; then
-			$iptables -t mangle -A ${NAME}_${network}_mark -m mac --mac-source $mac -j MARK --set-mark $hex_id
-		fi
-		if [ -n "$iptables_ipv6_ver" ]; then
-			$ip6tables -t mangle -A ${NAME}_${network}_mark -m mac --mac-source $mac -j MARK --set-mark $hex_id
-		fi
-		
+		$tc filter add dev ${dev} parent ffff: prio $id protocol all flower src_mac $mac action mirred egress redirect dev ${dev}_ifb
 		$tc class add dev ${dev}_ifb parent 1:1 classid 1:$id htb rate "$UL"kbit ceil "$UL"kbit prio $id quantum 1500
-		$tc qdisc add dev ${dev}_ifb parent 1:"$id" handle "$id": sfq perturb 1
-		
-		# Primary: Use firewall mark for more precise control (higher priority)
-		if [ -n "$nftables_ver" ] || [ -n "$iptables_ver" ]; then
-			$tc filter add dev ${dev}_ifb parent 1: protocol ip prio $id handle $hex_id fw flowid 1:$id
-			$tc filter add dev ${dev}_ifb parent 1: protocol ipv6 prio $(($id + 1)) handle $hex_id fw flowid 1:$id
-		else
-			# Fallback: Use U32 matching when firewall is not available
-			$tc filter add dev ${dev}_ifb parent 1: protocol ip prio $id u32 match u16 0x0800 0xFFFF at -2 match u16 0x"${M2}" 0xFFFF at -4 match u32 0x"${M0}${M1}" 0xFFFFFFFF at -8 flowid 1:$id
-			$tc filter add dev ${dev}_ifb parent 1: protocol ipv6 prio $(($id + 1)) u32 match u16 0x86DD 0xFFFF at -2 match u16 0x"${M2}" 0xFFFF at -4 match u32 0x"${M0}${M1}" 0xFFFFFFFF at -8 flowid 1:$id
-		fi
-	elif [ "$UL" -eq 0 ]; then
-		$tc filter add dev ${dev}_ifb parent 1: protocol ip prio $id u32 match u16 0x0800 0xFFFF at -2 match u16 0x"${M2}" 0xFFFF at -4 match u32 0x"${M0}${M1}" 0xFFFFFFFF at -8 flowid 1:1
-		$tc filter add dev ${dev}_ifb parent 1: protocol ipv6 prio $(($id + 1)) u32 match u16 0x86DD 0xFFFF at -2 match u16 0x"${M2}" 0xFFFF at -4 match u32 0x"${M0}${M1}" 0xFFFFFFFF at -8 flowid 1:1
+		$tc qdisc add dev ${dev}_ifb parent 1:"$id" handle "$id": fq_codel
+		$tc filter add dev ${dev}_ifb parent 1: prio $id protocol all flower src_mac $mac classid 1:$id
 	fi
 	if [ "$DL" -gt 0 ]; then
 		$tc class add dev ${dev} parent 1:1 classid 1:$id htb rate "$DL"kbit ceil "$DL"kbit prio $id quantum 1500
-		$tc qdisc add dev ${dev} parent 1:"$id" handle "$id": sfq perturb 1
-		# IPv4 and IPv6 filters
-		$tc filter add dev ${dev} parent 1: protocol ip prio $id u32 match u16 0x0800 0xFFFF at -2 match u32 0x${M1}${M2} 0xFFFFFFFF at -12 match u16 0x${M0} 0xFFFF at -14 flowid 1:$id
-		$tc filter add dev ${dev} parent 1: protocol ipv6 prio $(($id + 1)) u32 match u16 0x86DD 0xFFFF at -2 match u32 0x${M1}${M2} 0xFFFFFFFF at -12 match u16 0x${M0} 0xFFFF at -14 flowid 1:$id
-	elif [ "$DL" -eq 0 ]; then
-		$tc filter add dev ${dev} parent 1: protocol ip prio $id u32 match u16 0x0800 0xFFFF at -2 match u32 0x"${M1}${M2}" 0xFFFFFFFF at -12 match u16 0x"${M0}" 0xFFFF at -14 flowid 1:1
-		$tc filter add dev ${dev} parent 1: protocol ipv6 prio $(($id + 1)) u32 match u16 0x86DD 0xFFFF at -2 match u32 0x"${M1}${M2}" 0xFFFFFFFF at -12 match u16 0x"${M0}" 0xFFFF at -14 flowid 1:1
+		$tc qdisc add dev ${dev} parent 1:"$id" handle "$id": fq_codel
+		$tc filter add dev ${dev} parent 1: prio $id protocol all flower dst_mac $mac classid 1:$id
 	fi
 
 	echo "$1" >> $IDLIST ;  cat $IDLIST | sort | uniq  > $TMPID ;cat $TMPID >$IDLIST ;rm -rf $TMPID
@@ -359,42 +245,20 @@ add_ip() {
 	network=`echo $1 | sed 's/\[.*\]//' `
 	dev=$(uci get network.$network.device)
 	id=$(cal_uuid $1)
-	hex_id=$(printf "0x%x" $id)
 
-	[ "${DEBUG:-0}" -eq 0 ] || echo "D: add_ip $@ --$id --$ip"
 	Z=`echo $ip |awk -F '[/]' '{print $2}' `
 	[ -n "$Z" ] && ip=`echo $ip |awk -F '[/]' '{print $1}' `|| Z=32
+	log_msg 2 "add_ip $1 id=$id ip=$ip/$Z UL=${UL}kbit DL=${DL}kbit dev=$dev"
 	if [ "$UL" -gt 0 ]; then
-		# Add firewall marking rules
-		if [ -n "$nftables_ver" ]; then
-			$nft add rule inet ${NAME}_${network} mark_traffic ip saddr $ip/$Z counter meta mark set $hex_id
-		fi
-		if [ -n "$iptables_ipv4_ver" ]; then
-			$iptables -t mangle -A ${NAME}_${network}_mark -s $ip/$Z -j MARK --set-mark $hex_id
-		fi
-		if [ -n "$iptables_ipv6_ver" ]; then
-			$ip6tables -t mangle -A ${NAME}_${network}_mark -s $ip/$Z -j MARK --set-mark $hex_id
-		fi
-		
+		$tc filter add dev ${dev} parent ffff: prio $id protocol ip flower src_ip $ip/$Z action mirred egress redirect dev ${dev}_ifb
 		$tc class add dev ${dev}_ifb parent 1:1 classid 1:$id htb rate "$UL"kbit ceil "$UL"kbit prio $id quantum 1500
-		$tc qdisc add dev ${dev}_ifb parent 1:"$id" handle "$id": sfq perturb 1
-		
-		# Primary: Use firewall mark for more precise control (higher priority)
-		if [ -n "$nftables_ver" ] || [ -n "$iptables_ver" ]; then
-			$tc filter add dev ${dev}_ifb parent 1: protocol ip prio $id handle $hex_id fw flowid 1:$id
-		else
-			# Fallback: Use U32 matching when firewall is not available
-			$tc filter add dev ${dev}_ifb parent 1:0 prio $id protocol ip u32 match ip src "$ip"/"$Z" classid 1:$id
-		fi
-	elif [ "$UL" -eq 0 ]; then
-		$tc filter add dev ${dev}_ifb parent 1:0 prio $id protocol ip u32 match ip src "$ip"/"$Z" classid 1:1
+		$tc qdisc add dev ${dev}_ifb parent 1:"$id" handle "$id": fq_codel
+		$tc filter add dev ${dev}_ifb parent 1:0 prio $id protocol ip flower src_ip $ip/$Z classid 1:$id
 	fi
 	if [ "$DL" -gt 0 ]; then
 		$tc class add dev ${dev} parent 1:1 classid 1:$id htb rate "$DL"kbit ceil "$DL"kbit prio $id quantum 1500
-		$tc qdisc add dev ${dev} parent 1:"$id" handle "$id": sfq perturb 1
-		$tc filter add dev ${dev} parent 1:0 prio $id protocol ip u32 match ip dst "$ip"/"$Z" classid 1:$id
-	elif [ "$DL" -eq 0 ]; then
-		$tc filter add dev ${dev} parent 1:0 prio $id protocol ip u32 match ip dst "$ip"/"$Z" classid 1:1
+		$tc qdisc add dev ${dev} parent 1:"$id" handle "$id": fq_codel
+		$tc filter add dev ${dev} parent 1:0 prio $id protocol ip flower dst_ip $ip/$Z classid 1:$id
 	fi
 
 	echo "$1" >> $IDLIST ;  cat $IDLIST | sort | uniq  > $TMPID ;cat $TMPID >$IDLIST ;rm -rf $TMPID
@@ -402,11 +266,14 @@ add_ip() {
 
 case "$crrun" in
 	"stop")
+		log_msg 2 "=== eqosplus stopping ==="
 		stop_qos
 		> $IDLIST
 		> $NETWORKS
 	;;
 	"start")
+		> $LOGFILE
+		log_msg 2 "=== eqosplus starting ==="
 		> $IDLIST
 		> $NETWORKS
 		init_qosplus
@@ -422,7 +289,7 @@ case "$crrun" in
 		done
 	;;
 	"del")
-		for id in `echo $crid | sed 's/,/ /g' ` ;do 
+		for id in `echo $crid | sed 's/,/ /g' ` ;do
 			del_id $id
 		done
 	;;
@@ -446,22 +313,10 @@ case "$crrun" in
 			echo "# filter #"
 			tc -s filter show dev ${dev}_ifb root
 			tc -s filter show dev ${dev}_ifb parent 1:
-			if [ -n "$nftables_ver" ]; then
-				echo "### NFTables Rules for $network ###"
-				nft list table inet ${NAME}_${network} 2>/dev/null
-			fi
-			if [ -n "$iptables_ipv4_ver" ] || [ -n "$iptables_ipv6_ver" ]; then
-				echo "### IPTables Rules for $network ###"
-				if [ -n "$iptables_ipv4_ver" ]; then
-					echo "IPv4 rules:"
-					iptables -t mangle -L ${NAME}_${network}_mark -n 2>/dev/null
-				fi
-				if [ -n "$iptables_ipv6_ver" ]; then
-					echo "IPv6 rules:"
-					ip6tables -t mangle -L ${NAME}_${network}_mark -n 2>/dev/null
-				fi
-			fi
 		done
+	;;
+	"log")
+		cat $LOGFILE 2>/dev/null
 	;;
 
 esac

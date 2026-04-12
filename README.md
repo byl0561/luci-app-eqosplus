@@ -1,211 +1,125 @@
-# luci-app-eqosplus - OpenWrt 定时限速插件
+# luci-app-eqosplus
 
-[![License](https://img.shields.io/badge/license-GPL%20v2-blue.svg)](LICENSE)
-[![OpenWrt](https://img.shields.io/badge/OpenWrt-Compatible-green.svg)](https://openwrt.org/)
+OpenWrt 定时网速限制插件。支持按 MAC/IP/子网 限速，支持定时调度。
 
-一个功能强大的 OpenWrt LuCI 定时限速插件，支持基于 MAC 地址和 IP 地址的智能网速控制，具备定时调度和多种时间模式。
+Fork 自 [sirpdboy/luci-app-eqosplus](https://github.com/sirpdboy/luci-app-eqosplus)，重构了底层架构，更适合低版本 OpenWrt。
 
-## 📋 功能特性
+## 与上游的区别
 
-### 🚀 核心功能
-- **多接口支持**: 支持多个网络接口上的设备同时进行限速控制
-- **双重识别**: 支持 MAC 地址和 IP 地址两种设备识别方式
-- **增强设备发现**: 集成 DHCP 租约、ARP 表和 DNS 解析的设备发现机制
-- **防火墙集成**: 支持 NFTables 和 IPTables 双重防火墙标记
-- **定时控制**: 精确的时间调度，支持自定义起控和停控时间
-- **灵活时间模式**: 支持每日、工作日、休息日、自定义星期等多种时间模式
-- **IPv4/IPv6 兼容**: 同时支持 IPv4 和 IPv6 网络环境
-- **实时状态监控**: Web 界面实时显示服务运行状态
+| | 上游 (sirpdboy) | 本项目 |
+|--|----------------|--------|
+| 流量分类 | nftables mark + tc u32 | **tc flower**（无防火墙依赖） |
+| 队列管理 | SFQ | **fq_codel**（自带 AQM，降低延迟） |
+| 网络支持 | 单网络 | 多网络（按接口自动分区） |
+| VLAN 兼容 | u32 偏移受 VLAN 标签影响 | flower 不受影响 |
+| 不受控设备 | 所有流量经 IFB | 仅受控设备经 IFB，其余零开销 |
+| 跨 VLAN 旁路 | 无 | 自动检测 bridge 子网，跨 VLAN 不限速 |
+| 跨午夜定时 | 不支持 | 支持（如 23:00-06:00） |
+| 并发保护 | 文件锁（有竞态） | mkdir 原子锁 |
+| 调试工具 | 无 | 日志系统 + 诊断 + 结构/流量测试 |
+| 最低要求 | nftables (OpenWrt 22.03+) | **tc flower (OpenWrt 19.07+)** |
 
-### ⏰ 定时功能
-- **精确时间控制**: 支持 HH:MM 格式的时间设置
-- **多星期模式**:
-  - 每日 (0)
-  - 单日 (1-7: 周一到周日)
-  - 工作日 (1,2,3,4,5)
-  - 休息日 (6,7)
-  - 自定义组合 (如: 1,3,5)
-- **自动调度**: 后台守护进程每30秒检查一次时间条件
+## 兼容性
 
-### 🎯 限速特性
-- **双向限速**: 独立设置上传和下载速度限制
-- **单位灵活**: 速度单位支持 MB/秒
-- **零限速支持**: 支持设置为0来取消限速
-- **智能过滤**: 使用 Linux TC (Traffic Control) 和防火墙标记实现精确流量控制
-- **双重标记**: 同时使用 NFTables/IPTables 标记和 TC U32 匹配
-- **设备识别增强**: 显示设备主机名和详细信息
+| OpenWrt 版本 | 内核 | tc flower | 兼容性 |
+|-------------|------|-----------|--------|
+| 19.07 | 4.14 | cls_flower 可用 | 理论兼容 |
+| 21.02 | 5.4 | cls_flower 可用 | **已测试** |
+| 22.03 | 5.10 | cls_flower 可用 | 兼容 |
+| 23.05 | 5.15 | cls_flower 可用 | 兼容 |
+| 24.10 | 6.6 | cls_flower 可用 | 兼容 |
 
-## 🛠️ 技术架构
-
-### 核心组件
-- **eqosplus**: 主控制脚本，负责 TC 规则管理
-- **eqosplusctrl**: 定时控制守护进程
-- **LuCI 界面**: Web 管理界面
-- **UCI 配置**: 基于 OpenWrt 统一配置接口
-
-### 依赖组件
-- `bash`: Shell 脚本执行环境
-- `tc`: Linux 流量控制工具
-- `kmod-sched-core`: 内核调度模块
-- `kmod-ifb`: 中间功能块模块
-- `iptables-mod-filter`: iptables 过滤模块
-- `iptables-mod-nat-extra`: iptables NAT 扩展模块
-
-### 可选依赖（增强功能）
-- `nftables`: 现代防火墙工具（用于防火墙标记）
-- `iptables`: 传统防火墙工具IPv4支持（用于防火墙标记）
-- `ip6tables`: 传统防火墙工具IPv6支持（用于防火墙标记）
-
-**注意**: 防火墙工具为可选依赖，插件会自动检测并使用可用的防火墙工具。支持以下组合：
-- 仅IPv4: 只有 `iptables` 可用
-- 仅IPv6: 只有 `ip6tables` 可用  
-- 双栈: `iptables` + `ip6tables` 都可用
-- 现代: `nftables` 可用（同时支持IPv4和IPv6）
-- 无防火墙: 自动回退到纯TC U32匹配模式
-
-## 📦 安装说明
+## 安装
 
 ### 从源码编译
+
 ```bash
-# 克隆仓库
-git clone https://github.com/byl0561/luci-app-eqosplus.git
-
-# 进入项目目录
-cd luci-app-eqosplus
-
-# 编译安装
+# 在 OpenWrt SDK 目录下
+git clone https://github.com/byl0561/luci-app-eqosplus.git package/luci-app-eqosplus
 make package/luci-app-eqosplus/compile V=s
 ```
 
-### 手动安装
-1. 下载对应的 `.ipk` 安装包
-2. 通过 LuCI 界面或命令行安装：
+### 安装 ipk
+
 ```bash
 opkg install luci-app-eqosplus_*.ipk
 ```
 
-## 🎮 使用指南
+### 依赖
 
-### 基本配置
-1. 登录 OpenWrt Web 管理界面
-2. 导航至 `服务` → `定时限速`
-3. 启用服务开关
-4. 为每个网络接口配置限速规则
+自动安装：`bash` `tc` `kmod-sched-core` `kmod-ifb` `kmod-sched` `kmod-sched-flower` `luci` `luci-base` `luci-compat`
 
-### 规则配置
-- **设备识别**: 输入 MAC 地址或 IP 地址
-- **速度限制**: 设置上传/下载速度 (MB/秒)
-- **时间控制**: 设置起控时间和停控时间
-- **星期选择**: 选择适用的星期模式
-- **备注**: 添加规则描述便于管理
+## 使用
 
-### 高级功能
-- **多接口管理**: 支持 LAN、WAN 等多个接口独立配置
-- **增强设备发现**: 自动发现网络设备并显示主机名
-- **防火墙集成**: 与现有防火墙规则无缝集成
-- **实时监控**: 查看当前运行状态和统计信息
-- **自动重启**: 系统每天凌晨1点自动重启服务
+### 基本操作
 
-## ⚙️ 配置示例
+1. 进入 **服务 → 定时限速**
+2. 勾选 **启用**
+3. 在对应网络接口下添加规则
 
-### 配置文件位置
-- 主配置: `/etc/config/eqosplus`
-- 状态文件: `/var/eqosplus.idlist`
-- 网络列表: `/var/eqosplus.networks`
+### 规则示例
 
-### 典型配置
+| 场景 | IP/MAC 填写 | 下载(MB/s) | 上传(MB/s) | 时间 | 星期 |
+|------|------------|-----------|-----------|------|------|
+| 限制单个设备 | `AA:BB:CC:DD:EE:FF` | 10 | 5 | 00:00-00:00 | 每天 |
+| 限制单个 IP | `192.168.1.100` | 5 | 2 | 08:00-22:00 | 工作日 |
+| 限制子网(共享) | `192.168.10.0/24` | 20 | 10 | 00:00-00:00 | 每天 |
+| 夜间限速 | `AA:BB:CC:DD:EE:FF` | 1 | 0.5 | 23:00-07:00 | 每天 |
+
+- 时间 `00:00-00:00` 表示全天生效
+- 下载/上传单位为 **MB/秒**（非 Mbit/秒）
+- 子网规则下所有设备共享带宽
+
+### 调试
+
+在设置中将 **日志级别** 调为 Info 或 Debug，页面底部会实时显示日志。
+
+点击 **运行诊断** 查看当前 tc 规则状态。
+
+点击 **结构测试** / **流量测试** 验证 tc 功能是否正常。
+
+### 命令行
+
 ```bash
-# 启用服务
-config eqosplus
-    option service_enable '1'
-
-# LAN 接口限速规则
-config network_lan 'rule1'
-    option enable '1'
-    option mac 'AA:BB:CC:DD:EE:FF'
-    option download '5'
-    option upload '2'
-    option timestart '08:00'
-    option timeend '18:00'
-    option week '1,2,3,4,5'
-    option comment '工作日限速'
+/etc/init.d/eqosplus start|stop|restart   # 服务控制
+eqosplus status                            # 查看 tc 规则
+eqosplus log                               # 查看日志
 ```
 
-## 🔧 命令行工具
+## 技术说明
 
-### 服务控制
-```bash
-# 启动服务
-/etc/init.d/eqosplus start
+### 限速原理
 
-# 停止服务
-/etc/init.d/eqosplus stop
-
-# 重启服务
-/etc/init.d/eqosplus restart
+```
+下载: 互联网 → 路由 → FORWARD → br-lan egress → HTB(flower dst_mac/dst_ip 分类) → 设备
+上传: 设备 → br-lan ingress → mirred → IFB egress → HTB(flower src_mac/src_ip 分类) → 路由 → 互联网
 ```
 
-### 手动控制
-```bash
-# 添加限速规则
-eqosplus add network_lan[0]
+- 下载方向：tc 挂在 br-lan 出口，flower 匹配目标 MAC/IP
+- 上传方向：仅受控设备的流量被 mirred 到 IFB，flower 匹配源 MAC/IP
+- 不受控设备：下载走 default class (fq_codel)，上传不经过 IFB
 
-# 删除限速规则
-eqosplus del network_lan[0]
+### 跨 VLAN 旁路
 
-# 查看状态
-eqosplus status
+启动时自动扫描所有 bridge 设备的子网，对源/目标在 LAN 子网内的流量放行（不限速）。CGNAT 环境安全（不依赖 RFC1918 段，只匹配实际 bridge 子网）。
+
+### 文件结构
+
+```
+/usr/bin/eqosplus              主脚本（tc 规则管理）
+/usr/bin/eqosplusctrl          定时守护进程（30秒轮询）
+/usr/bin/eqosplus_test         结构测试（dummy 设备）
+/usr/bin/eqosplus_traffic_test 流量测试（veth + namespace）
+/etc/init.d/eqosplus           服务管理
+/etc/hotplug.d/iface/10-eqosplus  接口变化自动重启
+/etc/config/eqosplus           配置文件
+/tmp/eqosplus.log              运行日志
 ```
 
-## 🐛 故障排除
+## 许可证
 
-### 常见问题
-1. **服务无法启动**: 检查依赖模块是否已安装
-2. **限速不生效**: 确认设备 MAC/IP 地址正确
-3. **时间控制异常**: 检查系统时间是否正确
-4. **多接口冲突**: 确保不同接口使用不同的网络配置
+GPL v2
 
-### 调试模式
-启用调试输出：
-```bash
-# 编辑 eqosplus 脚本，设置 DEBUG=1
-DEBUG=1
-```
+## 致谢
 
-### 日志查看
-```bash
-# 查看服务状态
-logread | grep eqosplus
-
-# 查看 TC 规则
-tc -s qdisc show
-tc -s class show
-```
-
-## 🤝 贡献指南
-
-欢迎提交 Issue 和 Pull Request！
-
-1. Fork 本仓库
-2. 创建功能分支
-3. 提交更改
-4. 发起 Pull Request
-
-## 📄 许可证
-
-本项目基于 GPL v2 许可证开源。详见 [LICENSE](LICENSE) 文件。
-
-## 👥 维护者
-
-- **lava** <byl0561@gmail.com>
-- **sirpdboy** <herboy2008@gmail.com> (原始作者)
-
-## 🔗 相关链接
-
-- [GitHub 仓库](https://github.com/byl0561/luci-app-eqosplus)
-- [OpenWrt 官方文档](https://openwrt.org/docs)
-- [LuCI 开发指南](https://openwrt.org/docs/guide-developer/luci)
-
----
-
-**注意**: 使用前请仔细阅读配置说明，错误的配置可能影响网络连接。建议在测试环境中先行验证。
+- [sirpdboy](https://github.com/sirpdboy/luci-app-eqosplus) — 原始项目作者

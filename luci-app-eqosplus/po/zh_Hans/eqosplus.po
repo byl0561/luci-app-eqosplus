@@ -56,3 +56,72 @@ msgstr "工作日"
 msgid "Automatic settings"
 msgstr "自动设置"
 
+msgid "Log Level"
+msgstr "日志级别"
+
+msgid "Off"
+msgstr "关闭"
+
+msgid "Error"
+msgstr "错误"
+
+msgid "Info"
+msgstr "信息"
+
+msgid "Debug"
+msgstr "调试"
+
+msgid "Log Output"
+msgstr "日志输出"
+
+msgid "Diagnostics"
+msgstr "诊断"
+
+msgid "Run Diagnostics"
+msgstr "运行诊断"
+
+msgid "Tests"
+msgstr "测试"
+
+msgid "Structure Test"
+msgstr "结构测试"
+
+msgid "Traffic Test"
+msgstr "流量测试"
+
+msgid "Running..."
+msgstr "运行中..."
+
+msgid "Checking..."
+msgstr "检测中..."
+
+msgid "Installing..."
+msgstr "安装中..."
+
+msgid "No output"
+msgstr "无输出"
+
+msgid "Install failed"
+msgstr "安装失败"
+
+msgid "is not installed. Install now?"
+msgstr "未安装。是否立即安装？"
+
+msgid "Updating package list and installing"
+msgstr "更新软件源并安装"
+
+msgid "Running tests, please wait..."
+msgstr "正在运行测试，请稍候..."
+
+msgid "Waiting for log data..."
+msgstr "等待日志数据..."
+
+msgid "RUNNING"
+msgstr "已运行"
+
+msgid "NOT RUNNING"
+msgstr "未运行"
+
+msgid "Configuration"
+msgstr "配置"
+

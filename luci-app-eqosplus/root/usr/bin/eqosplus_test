@@ -1,0 +1,225 @@
+#!/bin/sh
+# eqosplus structure test - uses dummy device, no real traffic
+# Requires: kmod-dummy
+
+TEST_DEV="eqos_test0"
+TEST_IFB="${TEST_DEV}_ifb"
+TEST_MAC="02:00:00:00:00:01"
+TEST_IP="172.31.255.1"
+PASS=0; FAIL=0; TOTAL=0
+
+cleanup() {
+	tc qdisc del dev $TEST_DEV root 2>/dev/null
+	tc qdisc del dev $TEST_DEV ingress 2>/dev/null
+	tc qdisc del dev $TEST_IFB root 2>/dev/null
+	ip link del $TEST_IFB 2>/dev/null
+	ip link del $TEST_DEV 2>/dev/null
+}
+
+trap cleanup EXIT
+
+assert() {
+	local name="$1"; shift
+	TOTAL=$((TOTAL + 1))
+	if "$@" >/dev/null 2>&1; then
+		echo "PASS: $name"
+		PASS=$((PASS + 1))
+	else
+		echo "FAIL: $name"
+		FAIL=$((FAIL + 1))
+	fi
+}
+
+assert_fail() {
+	local name="$1"; shift
+	TOTAL=$((TOTAL + 1))
+	if ! "$@" >/dev/null 2>&1; then
+		echo "PASS: $name"
+		PASS=$((PASS + 1))
+	else
+		echo "FAIL: $name"
+		FAIL=$((FAIL + 1))
+	fi
+}
+
+# Verify a tc object exists by checking output contains a pattern
+tc_has() {
+	tc $* 2>/dev/null | grep -q "$PATTERN"
+}
+
+echo "=== eqosplus structure test ==="
+echo ""
+
+# --- Setup ---
+ip link add $TEST_DEV type dummy || { echo "FAIL: cannot create dummy device (kmod-dummy installed?)"; exit 1; }
+ip link set $TEST_DEV up
+
+echo "-- Infrastructure --"
+
+# HTB root qdisc
+tc qdisc add dev $TEST_DEV root handle 1:0 htb default 1
+PATTERN="htb"
+assert "HTB root qdisc create" tc_has qdisc show dev $TEST_DEV
+tc qdisc del dev $TEST_DEV root
+
+# HTB class
+tc qdisc add dev $TEST_DEV root handle 1:0 htb default 1
+tc class add dev $TEST_DEV parent 1:0 classid 1:1 htb rate 80gbit prio 0 quantum 1500
+tc class add dev $TEST_DEV parent 1:1 classid 1:1100 htb rate 8000kbit ceil 8000kbit prio 1100 quantum 1500
+PATTERN="1:1100"
+assert "HTB class create" tc_has class show dev $TEST_DEV
+
+# fq_codel leaf
+tc qdisc add dev $TEST_DEV parent 1:1100 handle 1100: fq_codel
+PATTERN="fq_codel"
+assert "fq_codel leaf qdisc" tc_has qdisc show dev $TEST_DEV
+tc qdisc del dev $TEST_DEV root
+
+# IFB device
+ip link add dev $TEST_IFB name $TEST_IFB type ifb
+ip link set dev $TEST_IFB up
+PATTERN="$TEST_IFB"
+assert "IFB device create" ip link show $TEST_IFB
+
+# IFB qdisc
+tc qdisc add dev $TEST_IFB root handle 1:0 htb default 1
+tc class add dev $TEST_IFB parent 1:0 classid 1:1 htb rate 80gbit prio 0 quantum 1500
+PATTERN="htb"
+assert "IFB HTB qdisc" tc_has qdisc show dev $TEST_IFB
+
+# fq_codel on default class
+tc qdisc add dev $TEST_IFB parent 1:1 fq_codel
+PATTERN="fq_codel"
+assert "fq_codel on default class" tc_has qdisc show dev $TEST_IFB
+
+# Ingress qdisc
+tc qdisc add dev $TEST_DEV root handle 1:0 htb default 1
+tc class add dev $TEST_DEV parent 1:0 classid 1:1 htb rate 80gbit prio 0 quantum 1500
+tc qdisc add dev $TEST_DEV ingress
+PATTERN="ingress"
+assert "ingress qdisc create" tc_has qdisc show dev $TEST_DEV
+
+echo ""
+echo "-- Flower classifier --"
+
+# flower dst_mac
+tc filter add dev $TEST_DEV parent 1: prio 1100 protocol all flower dst_mac $TEST_MAC classid 1:1
+PATTERN="dst_mac"
+assert "flower dst_mac filter" tc_has filter show dev $TEST_DEV parent 1:
+
+# flower src_mac on IFB
+tc class add dev $TEST_IFB parent 1:1 classid 1:1100 htb rate 8000kbit ceil 8000kbit prio 1100 quantum 1500
+tc filter add dev $TEST_IFB parent 1: prio 1100 protocol all flower src_mac $TEST_MAC classid 1:1100
+PATTERN="src_mac"
+assert "flower src_mac filter" tc_has filter show dev $TEST_IFB parent 1:
+
+# flower dst_ip
+tc filter add dev $TEST_DEV parent 1: prio 1102 protocol ip flower dst_ip $TEST_IP/32 classid 1:1
+PATTERN="dst_ip"
+assert "flower dst_ip filter" tc_has filter show dev $TEST_DEV parent 1:
+
+# flower src_ip on IFB
+tc filter add dev $TEST_IFB parent 1: prio 1102 protocol ip flower src_ip $TEST_IP/32 classid 1:1100
+PATTERN="src_ip"
+assert "flower src_ip filter" tc_has filter show dev $TEST_IFB parent 1:
+
+# flower filter delete by prio
+tc filter del dev $TEST_DEV pref 1100
+PATTERN="dst_mac"
+assert_fail "flower filter delete by prio" tc_has filter show dev $TEST_DEV parent 1:
+
+echo ""
+echo "-- Mirred --"
+
+# mirred redirect to IFB
+tc filter add dev $TEST_DEV parent ffff: prio 1100 protocol all flower src_mac $TEST_MAC action mirred egress redirect dev $TEST_IFB
+PATTERN="mirred"
+assert "mirred redirect to IFB" tc_has filter show dev $TEST_DEV parent ffff:
+
+echo ""
+echo "-- CIDR subnet --"
+
+# flower dst_ip CIDR
+tc filter add dev $TEST_DEV parent 1: prio 1104 protocol ip flower dst_ip 172.31.255.0/30 classid 1:1
+PATTERN="172.31.255.0/30"
+assert "flower dst_ip CIDR /30" tc_has filter show dev $TEST_DEV parent 1:
+tc filter del dev $TEST_DEV pref 1104
+
+# flower src_ip CIDR on IFB
+tc filter add dev $TEST_IFB parent 1: prio 1104 protocol ip flower src_ip 172.31.255.0/30 classid 1:1100
+PATTERN="172.31.255.0/30"
+assert "flower src_ip CIDR /30" tc_has filter show dev $TEST_IFB parent 1:
+tc filter del dev $TEST_IFB pref 1104
+
+echo ""
+echo "-- Full flows --"
+
+# Clean and rebuild for full flow tests
+tc filter del dev $TEST_DEV parent ffff: 2>/dev/null
+tc filter del dev $TEST_IFB parent 1:0 2>/dev/null
+tc filter del dev $TEST_DEV parent 1:0 2>/dev/null
+tc class del dev $TEST_IFB parent 1:1 classid 1:1100 2>/dev/null
+
+# Full MAC download: class + fq_codel + flower dst_mac
+tc class add dev $TEST_DEV parent 1:1 classid 1:1100 htb rate 8000kbit ceil 8000kbit prio 1100 quantum 1500
+tc qdisc add dev $TEST_DEV parent 1:1100 handle 1100: fq_codel
+tc filter add dev $TEST_DEV parent 1: prio 1100 protocol all flower dst_mac $TEST_MAC classid 1:1100
+PATTERN="1:1100"
+assert "full MAC download flow" tc_has class show dev $TEST_DEV
+
+# Full MAC upload: mirred + class + fq_codel + flower src_mac
+tc filter add dev $TEST_DEV parent ffff: prio 1100 protocol all flower src_mac $TEST_MAC action mirred egress redirect dev $TEST_IFB
+tc class add dev $TEST_IFB parent 1:1 classid 1:1100 htb rate 4000kbit ceil 4000kbit prio 1100 quantum 1500
+tc qdisc add dev $TEST_IFB parent 1:1100 handle 1100: fq_codel
+tc filter add dev $TEST_IFB parent 1: prio 1100 protocol all flower src_mac $TEST_MAC classid 1:1100
+PATTERN="1:1100"
+assert "full MAC upload flow" tc_has class show dev $TEST_IFB
+
+# Full IP download
+tc class add dev $TEST_DEV parent 1:1 classid 1:1102 htb rate 8000kbit ceil 8000kbit prio 1102 quantum 1500
+tc qdisc add dev $TEST_DEV parent 1:1102 handle 1102: fq_codel
+tc filter add dev $TEST_DEV parent 1: prio 1102 protocol ip flower dst_ip $TEST_IP/32 classid 1:1102
+PATTERN="1:1102"
+assert "full IP download flow" tc_has class show dev $TEST_DEV
+
+# Full cleanup (simulate del_id)
+tc qdisc del dev $TEST_DEV parent 1:1100 2>/dev/null
+tc qdisc del dev $TEST_IFB parent 1:1100 2>/dev/null
+tc class del dev $TEST_DEV parent 1:1 classid 1:1100 2>/dev/null
+tc class del dev $TEST_IFB parent 1:1 classid 1:1100 2>/dev/null
+tc filter del dev $TEST_DEV parent ffff: prio 1100 2>/dev/null
+tc filter del dev $TEST_IFB pref 1100 2>/dev/null
+tc filter del dev $TEST_DEV pref 1100 2>/dev/null
+PATTERN="1:1100"
+assert_fail "full cleanup (class removed)" tc_has class show dev $TEST_DEV
+
+# Full CIDR shared download: entire /30 subnet shares one class
+tc class add dev $TEST_DEV parent 1:1 classid 1:1104 htb rate 20000kbit ceil 20000kbit prio 1104 quantum 1500
+tc qdisc add dev $TEST_DEV parent 1:1104 handle 1104: fq_codel
+tc filter add dev $TEST_DEV parent 1: prio 1104 protocol ip flower dst_ip 172.31.255.0/30 classid 1:1104
+PATTERN="1:1104"
+assert "full CIDR /30 shared download" tc_has class show dev $TEST_DEV
+
+# Full CIDR shared upload: mirred + IFB for /30
+tc filter add dev $TEST_DEV parent ffff: prio 1104 protocol ip flower src_ip 172.31.255.0/30 action mirred egress redirect dev $TEST_IFB
+tc class add dev $TEST_IFB parent 1:1 classid 1:1104 htb rate 10000kbit ceil 10000kbit prio 1104 quantum 1500
+tc qdisc add dev $TEST_IFB parent 1:1104 handle 1104: fq_codel
+tc filter add dev $TEST_IFB parent 1: prio 1104 protocol ip flower src_ip 172.31.255.0/30 classid 1:1104
+PATTERN="1:1104"
+assert "full CIDR /30 shared upload" tc_has class show dev $TEST_IFB
+
+# Cleanup CIDR rules
+tc qdisc del dev $TEST_DEV parent 1:1104 2>/dev/null
+tc qdisc del dev $TEST_IFB parent 1:1104 2>/dev/null
+tc class del dev $TEST_DEV parent 1:1 classid 1:1104 2>/dev/null
+tc class del dev $TEST_IFB parent 1:1 classid 1:1104 2>/dev/null
+tc filter del dev $TEST_DEV parent ffff: prio 1104 2>/dev/null
+tc filter del dev $TEST_IFB pref 1104 2>/dev/null
+tc filter del dev $TEST_DEV pref 1104 2>/dev/null
+PATTERN="1:1104"
+assert_fail "full CIDR cleanup" tc_has class show dev $TEST_DEV
+
+echo ""
+echo "========================"
+echo "Total: $TOTAL  Pass: $PASS  Fail: $FAIL"
+[ $FAIL -eq 0 ] && echo "ALL PASSED" || echo "SOME FAILED"

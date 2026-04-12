@@ -7,7 +7,7 @@ START=99
 USE_PROCD=1
 
 NAME=eqosplus
-LOCK="/var/lock/$NAME.lock"
+LOCKDIR="/tmp/$NAME.lock"
 CR=/etc/crontabs/root
 
 start_instance() {
@@ -18,16 +18,21 @@ start_instance() {
 	procd_close_instance
 }
 
+_eqosplus_stop() {
+	kill $(busybox ps -w | grep 'eqosplusctrl' | grep -v 'grep' | awk '{print $1}') >/dev/null 2>&1
+	sed -i '/eqosplus/d' $CR >/dev/null 2>&1
+	eqosplus stop
+}
+
 _eqosplus_start() {
-	if [ "$(grep -c 'option service_enable .1.' /etc/config/$NAME 2>/dev/null)" -gt "0" ]; then
-		if [ x$(uci -q get turboacc.config.sw_flow) = 'x1' ] || [ x$(uci -q get turboacc.config.sfe_flow) = 'x1' ]  ;then
-				uci -q set turboacc.config.sw_flow='0'
-				uci -q set turboacc.config.sfe_flow='0'
+	if [ "$(uci -q get $NAME.@eqosplus[0].service_enable)" = "1" ]; then
+		if [ x$(uci -q get turboacc.config.sw_flow) = 'x1' ] || [ x$(uci -q get turboacc.config.sfe_flow) = 'x1' ]; then
+			uci -q set turboacc.config.sw_flow='0'
+			uci -q set turboacc.config.sfe_flow='0'
 			uci -q set turboacc.config.hw_flow='0'
 			uci commit turboacc
 			/etc/init.d/turboacc restart
 		fi
-		touch $LOCK
 		eqosplus start
 		start_instance
 		(crontab -l ; echo "00 1 * * * /etc/init.d/eqosplus start") | sort - | uniq - | crontab -
@@ -35,10 +40,9 @@ _eqosplus_start() {
 }
 
 start_service(){
-	[ -f $LOCK ] && exit
-	stop_service
+	mkdir $LOCKDIR 2>/dev/null || exit 0
+	_eqosplus_stop
 	_eqosplus_start
-	rm -f $LOCK
 }
 
 service_triggers() {
@@ -46,9 +50,6 @@ service_triggers() {
 }
 
 stop_service(){
-	kill -9 $(busybox ps -w | grep 'eqosplusctrl' | grep -v 'grep' | awk '{print $1}') >/dev/null 2>&1
-	sed -i '/eqosplus/d' $CR >/dev/null 2>&1
-	rm -f $LOCK 2>/dev/null
-	eqosplus stop
+	_eqosplus_stop
+	rmdir $LOCKDIR 2>/dev/null
 }
-

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Restart eqosplus when any interface comes up (except loopback)
+# Uses lockdir as "service running" indicator to skip during initial boot
+[ "$ACTION" = "ifup" ] && [ "$INTERFACE" != "loopback" ] && [ -d /tmp/eqosplus.lock ] && /etc/init.d/eqosplus restart

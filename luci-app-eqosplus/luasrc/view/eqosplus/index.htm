@@ -1,12 +1,99 @@
 <% include("cbi/map") %>
 <script type="text/javascript">//<![CDATA[
-	XHR.poll(2, '<%=luci.dispatcher.build_url("admin", "services", "eqosplus", "status" )%>', null,
+	// Status polling
+	XHR.poll(2, '<%=luci.dispatcher.build_url("admin", "services", "eqosplus", "status")%>', null,
 		function (x, result) {
 			var status = document.getElementsByClassName('eqosplus_status')[0];
+			if (!status) return;
 			status.setAttribute("style", "font-weight:bold;");
 			status.setAttribute("color", result.status ? "green" : "red");
 			status.innerHTML = result.status ? '<%=translate("RUNNING")%>' : '<%=translate("NOT RUNNING")%>';
 		}
-	)
+	);
+
+	// Log polling (5s)
+	XHR.poll(5, '<%=luci.dispatcher.build_url("admin", "services", "eqosplus", "get_log")%>', null,
+		function (x, result) {
+			var el = document.getElementById('eqosplus_log');
+			if (el && result && result.log) {
+				el.value = result.log;
+				el.scrollTop = el.scrollHeight;
+			}
+		}
+	);
+
+	// Run diagnostics
+	function runDiag() {
+		var btn = document.getElementById('btn_diag');
+		var out = document.getElementById('eqosplus_diag_output');
+		if (!btn || !out) return;
+		btn.disabled = true;
+		out.value = '<%=translate("Running...")%>';
+		XHR.get('<%=luci.dispatcher.build_url("admin", "services", "eqosplus", "diag")%>', null,
+			function(x, r) {
+				out.value = (r && r.output) || '<%=translate("No output")%>';
+				btn.disabled = false;
+			}
+		);
+	}
+
+	// Generic: check dep -> install if needed -> run test
+	function runTestWithDep(btnId, depPkg, testUrl) {
+		var btn = document.getElementById(btnId);
+		var out = document.getElementById('eqosplus_test_output');
+		if (!btn || !out) return;
+		var origLabel = btn.getAttribute('data-label');
+		btn.disabled = true;
+		btn.value = '<%=translate("Checking...")%>';
+		out.value = '';
+
+		var checkUrl = '<%=luci.dispatcher.build_url("admin", "services", "eqosplus", "check_dep")%>?pkg=' + depPkg;
+		var installUrl = '<%=luci.dispatcher.build_url("admin", "services", "eqosplus", "install_dep")%>?pkg=' + depPkg;
+
+		XHR.get(checkUrl, null, function(x, r) {
+			if (r && !r.installed) {
+				if (!confirm(depPkg + ' <%=translate("is not installed. Install now?")%>')) {
+					btn.disabled = false;
+					btn.value = origLabel;
+					return;
+				}
+				btn.value = '<%=translate("Installing...")%>';
+				out.value = '<%=translate("Updating package list and installing")%> ' + depPkg + '...';
+				XHR.get(installUrl, null, function(x, r2) {
+					if (!r2 || !r2.success) {
+						out.value = (r2 && r2.output) || '<%=translate("Install failed")%>';
+						btn.disabled = false;
+						btn.value = origLabel;
+						return;
+					}
+					doRunTest(btn, out, origLabel, testUrl);
+				});
+			} else {
+				doRunTest(btn, out, origLabel, testUrl);
+			}
+		});
+	}
+
+	function doRunTest(btn, out, origLabel, testUrl) {
+		btn.value = '<%=translate("Running...")%>';
+		out.value = '<%=translate("Running tests, please wait...")%>';
+		XHR.get(testUrl, null, function(x, r) {
+			out.value = (r && r.output) || '<%=translate("No output")%>';
+			btn.disabled = false;
+			btn.value = origLabel;
+		});
+	}
+
+	// Structure test (kmod-dummy)
+	function runTest() {
+		runTestWithDep('btn_test', 'kmod-dummy',
+			'<%=luci.dispatcher.build_url("admin", "services", "eqosplus", "run_test")%>');
+	}
+
+	// Traffic test (kmod-veth)
+	function runTrafficTest() {
+		runTestWithDep('btn_traffic_test', 'kmod-veth',
+			'<%=luci.dispatcher.build_url("admin", "services", "eqosplus", "run_traffic_test")%>');
+	}
 //]]>
 </script>

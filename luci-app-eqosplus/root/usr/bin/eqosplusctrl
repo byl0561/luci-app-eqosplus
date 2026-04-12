@@ -19,11 +19,15 @@ check_item() {
 	end_seconds=$(date -d "$end_time" +%s)
 
 	if [ "$start_seconds" -ge "$end_seconds" ]; then
-		return 1
-	fi
-
-	if [ "$current_time" -lt "$start_seconds" ] || [ "$current_time" -gt "$end_seconds" ]; then
-		return 1
+		# Cross-midnight (e.g., 23:00-06:00)
+		if [ "$current_time" -lt "$start_seconds" ] && [ "$current_time" -gt "$end_seconds" ]; then
+			return 1
+		fi
+	else
+		# Same day (e.g., 08:00-18:00)
+		if [ "$current_time" -lt "$start_seconds" ] || [ "$current_time" -gt "$end_seconds" ]; then
+			return 1
+		fi
 	fi
 
 	for ww in $(echo $wweek | sed 's/,/ /g'); do

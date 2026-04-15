@@ -22,7 +22,9 @@ case "$crrun" in
 		;;
 	*)
 		exec 9>"$LOCKFILE"
-		flock -w 10 9 || { echo "eqosplus: could not acquire lock, aborting" >&2; exit 1; }
+		# BusyBox flock lacks -w (timeout); poll with -n instead.
+		_i=0; while [ "$_i" -lt 10 ]; do flock -n 9 && break; sleep 1; _i=$((_i + 1)); done
+		[ "$_i" -ge 10 ] && { echo "eqosplus: could not acquire lock, aborting" >&2; exit 1; }
 		trap 'exec 9>&-; rm -f /var/$NAME.tmpid.* 2>/dev/null' EXIT HUP TERM INT
 		[ -f "$IDLIST" ]   || touch "$IDLIST"
 		[ -f "$NETWORKS" ] || touch "$NETWORKS"
@@ -293,12 +295,13 @@ EOF
 	# by the teardown+reinit above. Re-add its rules to restore QoS.
 	# (Mirrors the shared-device handling in stop_network.)
 	local other
-	for other in $(cat "$NETWORKS" 2>/dev/null); do
+	while IFS= read -r other; do
+		[ -n "$other" ] || continue
 		[ "$other" = "$network" ] && continue
 		[ "$(get_net_device "$other")" = "$dev" ] || continue
 		log_msg 2 "start_network: dev=$dev shared by $other, re-adding its rules"
 		_readd_network_rules "$other"
-	done
+	done < "$NETWORKS" 2>/dev/null
 }
 
 stop_network() {
@@ -320,9 +323,10 @@ stop_network() {
 
 	# Check if another network shares this device
 	local other_shared=""
-	for other in $(cat "$NETWORKS" 2>/dev/null); do
+	while IFS= read -r other; do
+		[ -n "$other" ] || continue
 		[ "$(get_net_device "$other")" = "$dev" ] && { other_shared="$other"; break; }
-	done
+	done < "$NETWORKS" 2>/dev/null
 
 	if [ -n "$other_shared" ]; then
 		# Device shared: rebuild tc infrastructure via start_network for the other network.
@@ -351,21 +355,23 @@ sync_networks() {
 	need_stop=$(comm -13 "$tmp_all" "$tmp_run")
 	rm -f "$tmp_all" "$tmp_run"
 
-	for item in $need_start; do
-		start_network "$item"
-	done
+	while IFS= read -r item; do
+		[ -n "$item" ] && start_network "$item"
+	done <<EOF
+$need_start
+EOF
 
-	for item in $need_stop; do
-		stop_network "$item"
-	done
+	while IFS= read -r item; do
+		[ -n "$item" ] && stop_network "$item"
+	done <<EOF
+$need_stop
+EOF
 }
 
 stop_qos() {
-	local running_networks
-	running_networks=$(cat "$NETWORKS" 2>/dev/null)
-	for item in $running_networks; do
-		stop_network "$item"
-	done
+	while IFS= read -r item; do
+		[ -n "$item" ] && stop_network "$item"
+	done < "$NETWORKS" 2>/dev/null
 }
 
 cleanup_orphaned_rules() {
@@ -606,12 +612,12 @@ case "$crrun" in
 		bump_generation
 	;;
 	"status")
-		running_networks=$(cat "$NETWORKS" 2>/dev/null)
-		if [ -z "$running_networks" ]; then
+		if [ ! -s "$NETWORKS" ]; then
 			echo "No active networks. Is the service running?"
 			exit 0
 		fi
-		for network in $running_networks; do
+		while IFS= read -r network; do
+			[ -n "$network" ] || continue
 			dev=$(get_net_device "$network")
 			[ -n "$dev" ] || continue
 			echo "### Statistics $dev ###"
@@ -630,7 +636,7 @@ case "$crrun" in
 			echo "# filter #"
 			tc -s filter show dev "${dev}_ifb" root
 			tc -s filter show dev "${dev}_ifb" parent 1:
-		done
+		done < "$NETWORKS" 2>/dev/null
 	;;
 	"log")
 		cat "$LOGFILE" 2>/dev/null

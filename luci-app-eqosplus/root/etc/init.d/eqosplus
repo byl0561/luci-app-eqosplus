@@ -9,6 +9,18 @@ USE_PROCD=1
 NAME=eqosplus
 LOCKFILE="/tmp/$NAME.lock"
 
+# BusyBox flock lacks -w (timeout); poll with -n instead.
+# Usage: _flock_wait <fd> <max_seconds>
+_flock_wait() {
+	local fd=$1 max=$2 i=0
+	while [ "$i" -lt "$max" ]; do
+		flock -n "$fd" && return 0
+		sleep 1
+		i=$((i + 1))
+	done
+	return 1
+}
+
 start_instance() {
 	procd_open_instance
 	procd_set_param command /usr/bin/eqosplusctrl
@@ -37,7 +49,7 @@ start_service(){
 	# Must close explicitly — procd calls these functions in-process,
 	# so leaked FDs accumulate across service operations.
 	exec 200>"$LOCKFILE"
-	flock -w 15 200 || { exec 200>&-; logger -t eqosplus "start_service: could not acquire lock after 15s, skipping"; return 1; }
+	_flock_wait 200 15 || { exec 200>&-; logger -t eqosplus "start_service: could not acquire lock after 15s, skipping"; return 1; }
 	_eqosplus_stop
 	_eqosplus_start
 	exec 200>&-
@@ -49,7 +61,7 @@ service_triggers() {
 
 reload_service() {
 	exec 200>"$LOCKFILE"
-	flock -w 15 200 || { exec 200>&-; logger -t eqosplus "reload_service: could not acquire lock"; return 1; }
+	_flock_wait 200 15 || { exec 200>&-; logger -t eqosplus "reload_service: could not acquire lock"; return 1; }
 	_eqosplus_stop
 	_eqosplus_start
 	exec 200>&-
@@ -57,7 +69,7 @@ reload_service() {
 
 stop_service(){
 	exec 200>"$LOCKFILE"
-	flock -w 15 200 || { exec 200>&-; logger -t eqosplus "stop_service: could not acquire lock"; return 1; }
+	_flock_wait 200 15 || { exec 200>&-; logger -t eqosplus "stop_service: could not acquire lock"; return 1; }
 	_eqosplus_stop
 	exec 200>&-
 }

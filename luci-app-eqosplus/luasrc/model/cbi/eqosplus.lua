@@ -19,13 +19,6 @@ uci_cursor:foreach("firewall", "zone", function(z)
 	end
 end)
 
--- Read enabled zones from UCI (default: lan)
-local enabled_zones_str = uci_cursor:get("eqosplus", "@eqosplus[0]", "enabled_zones") or "lan"
-local enabled_zones = {}
-for z in enabled_zones_str:gmatch("%S+") do
-	enabled_zones[z] = true
-end
-
 -- Build hostname lookup from DHCP leases + static leases
 local hostnames = {}
 local lease_file = io.open("/tmp/dhcp.leases", "r")
@@ -93,7 +86,6 @@ t = a:section(TypedSection, "eqosplus")
 t.anonymous = true
 
 e = t:option(MultiValue, "enabled_zones", translate("Visible Networks"))
-e.widget = "checkbox"
 e.delimiter = " "
 e.default = "lan"
 e.rmempty = false
@@ -112,11 +104,11 @@ local all_neigh_v4, all_neigh_v6 = {}, {}
 ipc.neighbors({family = 4}, function(n) all_neigh_v4[#all_neigh_v4 + 1] = n end)
 ipc.neighbors({family = 6}, function(n) all_neigh_v6[#all_neigh_v6 + 1] = n end)
 
--- Network sections (Configuration tab, only for enabled zones)
+-- Network sections (Configuration tab, all zones; JS controls visibility)
 for _, net in ipairs(nw:get_networks()) do
     local net_name = net:name()
     local zone = net_to_zone[net_name]
-    if zone and enabled_zones[zone] then
+    if zone then
 		local iface = net:get_interface()
 		local name = iface and iface:name()
 		local MAX_RULES = 50
@@ -283,5 +275,23 @@ e.default = "2"
 
 e = t:option(DummyValue, "debug_panel")
 e.template = "eqosplus/debug"
+
+-- After commit: delete rules for zones no longer in enabled_zones
+function a.on_after_commit(self)
+	local uci = require("luci.model.uci").cursor()
+	local new_str = uci:get("eqosplus", "@eqosplus[0]", "enabled_zones") or "lan"
+	local new_zones = {}
+	for z in new_str:gmatch("%S+") do new_zones[z] = true end
+
+	local to_delete = {}
+	uci:foreach("eqosplus", nil, function(s)
+		local net = (s[".type"] or ""):match("^network_(.+)$")
+		if net and net_to_zone[net] and not new_zones[net_to_zone[net]] then
+			to_delete[#to_delete + 1] = s[".name"]
+		end
+	end)
+	for _, name in ipairs(to_delete) do uci:delete("eqosplus", name) end
+	if #to_delete > 0 then uci:commit("eqosplus") end
+end
 
 return a

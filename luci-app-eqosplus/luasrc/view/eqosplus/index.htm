@@ -1,5 +1,50 @@
 <% include("cbi/map") %>
+<style>
+[id^="cbi-eqosplus-network_"] { display: none; }
+[id^="cbi-eqosplus-network_"].eqos-zone-visible { display: block !important; }
+</style>
 <script type="text/javascript">//<![CDATA[
+	// --- Zone -> network mapping (from firewall config) ---
+	var eqosZoneMap = <%
+		local json = require("luci.jsonc")
+		local uci_t = require("luci.model.uci").cursor()
+		local zmap = {}
+		uci_t:foreach("firewall", "zone", function(z)
+			if z.name and z.name ~= "wan" then
+				local nets = z.network or {}
+				if type(nets) == "string" then nets = {nets} end
+				zmap[z.name] = nets
+			end
+		end)
+		write(json.stringify(zmap))
+	%>;
+
+	// --- Dynamic zone visibility: show/hide network sections based on multi-select ---
+	(function() {
+		var sel = document.querySelector('select[name$=".enabled_zones"]');
+		if (!sel) return;
+		function syncVisibility() {
+			var selected = {};
+			for (var i = 0; i < sel.options.length; i++) {
+				if (sel.options[i].selected) selected[sel.options[i].value] = true;
+			}
+			for (var zone in eqosZoneMap) {
+				var nets = eqosZoneMap[zone];
+				for (var j = 0; j < nets.length; j++) {
+					var sec = document.getElementById('cbi-eqosplus-network_' + nets[j]);
+					if (sec) {
+						if (selected[zone]) {
+							sec.classList.add('eqos-zone-visible');
+						} else {
+							sec.classList.remove('eqos-zone-visible');
+						}
+					}
+				}
+			}
+		}
+		sel.addEventListener('change', syncVisibility);
+		syncVisibility();
+	})();
 	// --- Tab setup ---
 	(function() {
 		var map = document.querySelector('.cbi-map');
@@ -93,11 +138,16 @@
 	// Pure frontend: "always" is derived from timestart/timeend, not saved to UCI.
 	// Uses readonly (not disabled) so values still submit with the form.
 	(function() {
+		function findRow(el) {
+			return el.closest('tr') || el.closest('.cbi-section-table-row') || el.closest('.tr');
+		}
 		function toggleTimeFields(cb) {
-			var row = cb.closest('tr') || cb.closest('.cbi-section-table-row');
+			var row = findRow(cb);
 			if (!row) return;
+			// Match by name or id — covers all LuCI CBI rendering variants
 			var inputs = row.querySelectorAll(
-				'input[id*=".timestart"], input[id*=".timeend"]'
+				'input[name$=".timestart"], input[name$=".timeend"], ' +
+				'input[id$=".timestart"], input[id$=".timeend"]'
 			);
 			for (var i = 0; i < inputs.length; i++) {
 				inputs[i].readOnly = cb.checked;
@@ -111,6 +161,8 @@
 		}
 		function initAlwaysCheckboxes() {
 			var cbs = document.querySelectorAll(
+				'input[type="checkbox"][name$=".always"], ' +
+				'input[type="checkbox"][id$=".always"], ' +
 				'input[type="checkbox"][id*=".always"]'
 			);
 			for (var i = 0; i < cbs.length; i++) {
@@ -128,7 +180,11 @@
 		} else {
 			initAlwaysCheckboxes();
 		}
-		var observer = new MutationObserver(function() { initAlwaysCheckboxes(); });
+		var _debounceTimer = null;
+		var observer = new MutationObserver(function() {
+			if (_debounceTimer) clearTimeout(_debounceTimer);
+			_debounceTimer = setTimeout(initAlwaysCheckboxes, 100);
+		});
 		var map = document.querySelector('.cbi-map');
 		if (map) observer.observe(map, { childList: true, subtree: true });
 	})();

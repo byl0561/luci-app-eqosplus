@@ -2,6 +2,7 @@ module("luci.controller.eqosplus", package.seeall)
 -- Copyright 2022-2025 lava <byl0561@gmail.com>
 
 local allowed_pkgs = { ["kmod-dummy"] = true, ["kmod-veth"] = true, ["ip-full"] = true }
+local TIMEOUT = "/usr/lib/eqosplus/timeout_exec"
 
 function index()
     if not nixio.fs.access("/etc/config/eqosplus") then return end
@@ -47,7 +48,7 @@ end
 function act_diag()
     local sys = require "luci.sys"
     luci.http.prepare_content("application/json")
-    luci.http.write_json({output = sys.exec("timeout 30 eqosplus status 2>&1")})
+    luci.http.write_json({output = sys.exec(TIMEOUT .. " 30 eqosplus status 2>&1")})
 end
 
 function act_check_dep()
@@ -74,7 +75,7 @@ function act_install_dep()
         return
     end
     local qpkg = util.shellquote(pkg)
-    local output = sys.exec("timeout 60 opkg update 2>&1 && timeout 120 opkg install " .. qpkg .. " 2>&1")
+    local output = sys.exec(TIMEOUT .. " 60 opkg update 2>&1 && " .. TIMEOUT .. " 120 opkg install " .. qpkg .. " 2>&1")
     local success = sys.call("opkg list-installed 2>/dev/null | grep -qF " .. qpkg) == 0
     luci.http.prepare_content("application/json")
     luci.http.write_json({success = success, output = output})
@@ -118,7 +119,7 @@ function act_install_deps()
     for _, pkg in ipairs(to_install) do
         quoted[#quoted + 1] = util.shellquote(pkg)
     end
-    local cmd = "timeout 60 opkg update 2>&1 && timeout 120 opkg install " .. table.concat(quoted, " ") .. " 2>&1"
+    local cmd = TIMEOUT .. " 60 opkg update 2>&1 && " .. TIMEOUT .. " 120 opkg install " .. table.concat(quoted, " ") .. " 2>&1"
     local output = sys.exec(cmd)
     local all_ok = true
     for _, pkg in ipairs(to_install) do
@@ -134,11 +135,11 @@ end
 function act_run_test()
     local sys = require "luci.sys"
     luci.http.prepare_content("application/json")
-    luci.http.write_json({output = sys.exec("timeout 120 eqosplus_test 2>&1")})
+    luci.http.write_json({output = sys.exec(TIMEOUT .. " 120 eqosplus_test 2>&1")})
 end
 
 function act_run_traffic_test()
     local sys = require "luci.sys"
     luci.http.prepare_content("application/json")
-    luci.http.write_json({output = sys.exec("timeout 120 eqosplus_traffic_test 2>&1")})
+    luci.http.write_json({output = sys.exec(TIMEOUT .. " 120 eqosplus_traffic_test 2>&1")})
 end

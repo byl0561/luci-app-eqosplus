@@ -48,11 +48,14 @@ start_service(){
 	# FD 200: service-level lock (prevents concurrent start/stop/reload).
 	# Must close explicitly — procd calls these functions in-process,
 	# so leaked FDs accumulate across service operations.
+	# Signal trap ensures FD is closed even if interrupted mid-operation.
 	exec 200>"$LOCKFILE"
-	_flock_wait 200 15 || { exec 200>&-; logger -t eqosplus "start_service: could not acquire lock after 15s, skipping"; return 1; }
+	trap 'exec 200>&-' INT TERM HUP
+	_flock_wait 200 15 || { exec 200>&-; trap - INT TERM HUP; logger -t eqosplus "start_service: could not acquire lock after 15s, skipping"; return 1; }
 	_eqosplus_stop
 	_eqosplus_start
 	exec 200>&-
+	trap - INT TERM HUP
 }
 
 service_triggers() {
@@ -61,15 +64,19 @@ service_triggers() {
 
 reload_service() {
 	exec 200>"$LOCKFILE"
-	_flock_wait 200 15 || { exec 200>&-; logger -t eqosplus "reload_service: could not acquire lock"; return 1; }
+	trap 'exec 200>&-' INT TERM HUP
+	_flock_wait 200 15 || { exec 200>&-; trap - INT TERM HUP; logger -t eqosplus "reload_service: could not acquire lock"; return 1; }
 	_eqosplus_stop
 	_eqosplus_start
 	exec 200>&-
+	trap - INT TERM HUP
 }
 
 stop_service(){
 	exec 200>"$LOCKFILE"
-	_flock_wait 200 15 || { exec 200>&-; logger -t eqosplus "stop_service: could not acquire lock"; return 1; }
+	trap 'exec 200>&-' INT TERM HUP
+	_flock_wait 200 15 || { exec 200>&-; trap - INT TERM HUP; logger -t eqosplus "stop_service: could not acquire lock"; return 1; }
 	_eqosplus_stop
 	exec 200>&-
+	trap - INT TERM HUP
 }

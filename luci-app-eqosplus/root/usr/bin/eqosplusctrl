@@ -11,6 +11,8 @@ CACHE="/var/$NAME.sched_cache"
 last_mtime=""
 cached_idlist=""
 
+: ${EQOS_TIMEOUT:=/usr/lib/eqosplus/timeout_exec}
+
 . /usr/lib/eqosplus/uci_helpers.sh
 . /usr/lib/eqosplus/sched.sh
 
@@ -105,20 +107,24 @@ EOF
 	# IDLIST is unchanged on failure so next cycle retries.
 	# timeout prevents daemon from blocking forever if eqosplus hangs (e.g. flock wait).
 	if [ -n "$dels" ]; then
-		timeout 30 eqosplus del "$dels" \
+		$EQOS_TIMEOUT 30 eqosplus del "$dels" \
 			|| logger -t eqosplusctrl "del failed for: $dels, retry next cycle"
 	fi
 	if [ -n "$adds" ]; then
-		timeout 30 eqosplus add "$adds" \
+		$EQOS_TIMEOUT 30 eqosplus add "$adds" \
 			|| logger -t eqosplusctrl "add failed for: $adds, retry next cycle"
 	fi
 }
 
 trap 'rm -f "$CACHE"; exit 0' EXIT TERM INT HUP
 
-# Run immediately on startup, then every 30 seconds
+# Run immediately on startup, then every 30 seconds.
+# "sleep & wait" ensures the shell's wait builtin is the foreground operation,
+# so TERM/INT signals are delivered promptly (BusyBox ash does not interrupt
+# a foreground external sleep on signal).
 idlistusr
-while :;do
-	sleep 30
+while :; do
+	sleep 30 &
+	wait $!
 	idlistusr
 done

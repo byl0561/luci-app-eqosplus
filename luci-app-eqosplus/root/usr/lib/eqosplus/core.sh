@@ -118,14 +118,14 @@ eqos_add_mac() {
 		&& $EQOS_TC qdisc add dev "${dev}_ifb" parent 1:"$id" handle "$id": fq_codel \
 		&& $EQOS_TC filter add dev "${dev}_ifb" parent 1:0 prio "$id" protocol all flower src_mac "$mac" classid 1:"$id" \
 		&& $EQOS_TC filter add dev "${dev}" parent ffff: prio "$id" protocol all flower src_mac "$mac" action mirred egress redirect dev "${dev}_ifb" \
-		|| { eqos_del_id "$dev" "$id"; return 1; }
+		|| { eqos_del_id "$dev" "$id"; _eqos_verify_cleanup "$dev" "$id"; return 1; }
 	fi
 	if [ "$dl" -gt 0 ]; then
 		_htb_quantum "$dl"
 		$EQOS_TC class add dev "${dev}" parent 1:1 classid 1:"$id" htb rate "${dl}"kbit ceil "${dl}"kbit prio "$id" quantum "$_quantum" \
 		&& $EQOS_TC qdisc add dev "${dev}" parent 1:"$id" handle "$id": fq_codel \
 		&& $EQOS_TC filter add dev "${dev}" parent 1:0 prio "$id" protocol all flower dst_mac "$mac" classid 1:"$id" \
-		|| { eqos_del_id "$dev" "$id"; return 1; }
+		|| { eqos_del_id "$dev" "$id"; _eqos_verify_cleanup "$dev" "$id"; return 1; }
 	fi
 }
 
@@ -167,14 +167,14 @@ eqos_add_ip() {
 		&& $EQOS_TC qdisc add dev "${dev}_ifb" parent 1:"$id" handle "$id": fq_codel \
 		&& $EQOS_TC filter add dev "${dev}_ifb" parent 1:0 prio "$id" protocol "$proto" flower src_ip "$ip_addr/$prefix" classid 1:"$id" \
 		&& $EQOS_TC filter add dev "${dev}" parent ffff: prio "$id" protocol "$proto" flower src_ip "$ip_addr/$prefix" action mirred egress redirect dev "${dev}_ifb" \
-		|| { eqos_del_id "$dev" "$id"; return 1; }
+		|| { eqos_del_id "$dev" "$id"; _eqos_verify_cleanup "$dev" "$id"; return 1; }
 	fi
 	if [ "$dl" -gt 0 ]; then
 		_htb_quantum "$dl"
 		$EQOS_TC class add dev "${dev}" parent 1:1 classid 1:"$id" htb rate "${dl}"kbit ceil "${dl}"kbit prio "$id" quantum "$_quantum" \
 		&& $EQOS_TC qdisc add dev "${dev}" parent 1:"$id" handle "$id": fq_codel \
 		&& $EQOS_TC filter add dev "${dev}" parent 1:0 prio "$id" protocol "$proto" flower dst_ip "$ip_addr/$prefix" classid 1:"$id" \
-		|| { eqos_del_id "$dev" "$id"; return 1; }
+		|| { eqos_del_id "$dev" "$id"; _eqos_verify_cleanup "$dev" "$id"; return 1; }
 	fi
 }
 
@@ -193,4 +193,17 @@ eqos_del_id() {
 
 	$EQOS_TC_QUIET class del dev "${dev}" parent 1:1 classid 1:"$id" 2>/dev/null
 	$EQOS_TC_QUIET class del dev "${dev}_ifb" parent 1:1 classid 1:"$id" 2>/dev/null
+}
+
+# Verify that tc resources for an id have been fully cleaned up after eqos_del_id.
+# Logs a warning (via stderr) if orphaned classes remain in kernel memory.
+# Usage: _eqos_verify_cleanup <dev> <id>
+_eqos_verify_cleanup() {
+	local dev=$1 id=$2
+	[ -n "$dev" ] && [ -n "$id" ] || return
+	local d
+	for d in "$dev" "${dev}_ifb"; do
+		$EQOS_TC_QUIET class show dev "$d" classid 1:"$id" 2>/dev/null | grep -q . \
+			&& echo "eqos: WARN orphaned tc class 1:$id on $d after cleanup" >&2
+	done
 }

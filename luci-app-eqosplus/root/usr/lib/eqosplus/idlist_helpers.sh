@@ -50,13 +50,54 @@ _idlist_remove_entry() {
 }
 
 # Add an entry to IDLIST with device info (replaces any existing entry for same ID)
+# Atomic: single awk pass filters old entry, echo appends new, one mv commits.
 # Usage: _idlist_add_entry <rule_id> <device>
 _idlist_add_entry() {
 	local id=$1 dev=$2
-	_idlist_remove_entry "$id"
 	local tmpf
 	tmpf=$($EQOS_MKTEMP) || return 1
-	{ cat "$IDLIST" 2>/dev/null; echo "${id}:${dev}"; } | sort -u > "$tmpf" \
+	{ awk -v prefix="${id}:" 'substr($0, 1, length(prefix)) != prefix' "$IDLIST" 2>/dev/null
+	  echo "${id}:${dev}"
+	} > "$tmpf" \
 		&& mv "$tmpf" "$IDLIST" \
 		|| { $EQOS_LOG 1 "_idlist_add_entry: failed to update $IDLIST"; rm -f "$tmpf"; return 1; }
+}
+
+# Batch-remove multiple entries from IDLIST by rule ID (one awk + one mv).
+# Usage: _idlist_batch_remove <newline-separated IDs>
+_idlist_batch_remove() {
+	local ids=$1
+	[ -n "$ids" ] || return 0
+	local tmpf
+	tmpf=$($EQOS_MKTEMP) || return 1
+	echo "$ids" | awk '
+		NR==FNR { if ($0 != "") pfx[$0 ":"] = 1; next }
+		{ ok = 1; for (p in pfx) if (substr($0, 1, length(p)) == p) { ok = 0; break }
+		  if (ok) print }
+	' - "$IDLIST" > "$tmpf" 2>/dev/null \
+		&& mv "$tmpf" "$IDLIST" \
+		|| { rm -f "$tmpf"; $EQOS_LOG 1 "_idlist_batch_remove: failed"; return 1; }
+}
+
+# Batch-add multiple entries to IDLIST (one awk + one mv).
+# Replaces any existing entries with matching IDs, appends all new entries.
+# Usage: _idlist_batch_add <newline-separated "id:device" entries>
+_idlist_batch_add() {
+	local entries=$1
+	[ -n "$entries" ] || return 0
+	local tmpf
+	tmpf=$($EQOS_MKTEMP) || return 1
+	echo "$entries" | awk '
+		NR==FNR {
+			if ($0 == "") next
+			id = $0; sub(/:.*/, ":", id); pfx[id] = 1
+			new[++n] = $0
+			next
+		}
+		{ ok = 1; for (p in pfx) if (substr($0, 1, length(p)) == p) { ok = 0; break }
+		  if (ok) print }
+		END { for (i = 1; i <= n; i++) print new[i] }
+	' - "$IDLIST" > "$tmpf" 2>/dev/null \
+		&& mv "$tmpf" "$IDLIST" \
+		|| { rm -f "$tmpf"; $EQOS_LOG 1 "_idlist_batch_add: failed"; return 1; }
 }

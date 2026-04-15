@@ -92,6 +92,7 @@ dbg_ip() {
 EQOS_TC="dbg_tc"
 EQOS_IP="dbg_ip"
 . /usr/lib/eqosplus/core.sh
+. /usr/lib/eqosplus/sched.sh
 . /usr/lib/eqosplus/uci_helpers.sh
 
 # Cache uci show output to avoid repeated subprocess spawns during startup
@@ -351,8 +352,8 @@ sync_networks() {
 	tmp_run=$(safe_mktemp) || { rm -f "$tmp_all"; return 1; }
 	echo "$all_networks" > "$tmp_all"
 	echo "$running_networks" > "$tmp_run"
-	need_start=$(comm -23 "$tmp_all" "$tmp_run")
-	need_stop=$(comm -13 "$tmp_all" "$tmp_run")
+	need_start=$(grep -Fxvf "$tmp_run" "$tmp_all")
+	need_stop=$(grep -Fxvf "$tmp_all" "$tmp_run")
 	rm -f "$tmp_all" "$tmp_run"
 
 	while IFS= read -r item; do
@@ -376,17 +377,25 @@ stop_qos() {
 
 cleanup_orphaned_rules() {
 	local changed=false
+	# Cache network config once (1 fork) instead of per-network uci get (N forks).
+	# Dynamic interfaces (WireGuard, GRE) may not have a device field or may not be
+	# up yet at boot time — only delete rules for truly removed networks.
+	local _net_cfg
+	_net_cfg=$(uci show network 2>/dev/null)
 	for section in $(uci_show_cached | awk '/\]=network_/ { match($0, /@network_[^.\[]+/); if (RSTART) { s=substr($0, RSTART, RLENGTH); if (!seen[s]++) print s } }'); do
 		local network="${section#@network_}"; network="${network%%\[*}"
-		# Check if the network section itself exists in UCI (not just device availability).
-		# Dynamic interfaces (WireGuard, GRE) may not have a device field or may not be
-		# up yet at boot time — only delete rules for truly removed networks.
-		if ! uci -q get "network.${network}" >/dev/null 2>&1; then
-			log_msg 2 "cleanup: removing orphaned rules for network $network (no UCI section)"
-			# Delete all sections of this network type
-			while uci -q delete "$NAME.@network_${network}[0]" 2>/dev/null; do :; done
-			changed=true
-		fi
+		# Pure shell match: "network.<name>=" only matches section definition lines,
+		# not field lines (which have "network.<name>.<field>=").
+		# Safe because network names are [a-zA-Z0-9_] — no regex metachar risk.
+		case "$_net_cfg" in
+			*"network.${network}="*)
+				;;  # network exists in UCI
+			*)
+				log_msg 2 "cleanup: removing orphaned rules for network $network (no UCI section)"
+				while uci -q delete "$NAME.@network_${network}[0]" 2>/dev/null; do :; done
+				changed=true
+				;;
+		esac
 	done
 	$changed && { uci commit "$NAME"; _uci_cache=""; _enabled_networks_cache=""; }
 }
@@ -455,7 +464,13 @@ del_id() {
 	log_msg 2 "del_id $1 id=$id addr=$addr dev=$dev"
 	eqos_del_id "$dev" "$id"
 
-	_idlist_remove_entry "$1"
+	# Accumulate for batch flush if active, otherwise write immediately
+	if [ -n "$_batch_mode" ]; then
+		_pending_dels="${_pending_dels:+$_pending_dels
+}$1"
+	else
+		_idlist_remove_entry "$1"
+	fi
 }
 
 add_mac() {
@@ -487,7 +502,13 @@ add_mac() {
 		return 1
 	fi
 
-	_idlist_add_entry "$1" "$dev"
+	# Accumulate for batch flush if active, otherwise write immediately
+	if [ -n "$_batch_mode" ]; then
+		_pending_adds="${_pending_adds:+$_pending_adds
+}$1:$dev"
+	else
+		_idlist_add_entry "$1" "$dev"
+	fi
 }
 
 add_ip() {
@@ -519,7 +540,13 @@ add_ip() {
 		return 1
 	fi
 
-	_idlist_add_entry "$1" "$dev"
+	# Accumulate for batch flush if active, otherwise write immediately
+	if [ -n "$_batch_mode" ]; then
+		_pending_adds="${_pending_adds:+$_pending_adds
+}$1:$dev"
+	else
+		_idlist_add_entry "$1" "$dev"
+	fi
 }
 
 # Dispatch a rule ID to the appropriate add function (MAC or IP).
@@ -534,23 +561,52 @@ _add_rule() {
 	fi
 }
 
-# Re-add all enabled rules for a given network (used after tc infrastructure rebuild)
+# Re-add rules for a network that are both enabled AND currently scheduled active.
+# Used after tc infrastructure rebuild (shared-device restart, resync).
+# Single awk pass extracts IDs + schedule data; check_item is pure shell (0 forks).
 _readd_network_rules() {
 	local net=$1
 	[ -n "$_uci_cache" ] || _uci_cache=$(uci show "$NAME" 2>/dev/null)
-	local rule_ids
-	rule_ids=$(echo "$_uci_cache" | awk -v net="@network_${net}[" '
-		index($0, net) && /\.enable=\0471\047/ {
-			match($0, /@network_[^.]+/)
-			id = substr($0, RSTART+9, RLENGTH-9)
-			if (!seen[id]++) print id
-		}')
-	set -f
-	local rid
-	for rid in $rule_ids; do
-		_add_rule "$rid"
-	done
-	set +f
+
+	# Single date fork for current time
+	local now_h now_m now_w
+	read now_h now_m now_w <<EOF
+$(date +'%H %M %u')
+EOF
+
+	# Single awk pass: extract enabled rule IDs with schedule fields
+	# Output format: id|timestart|timeend|week
+	local _sched_data
+	_sched_data=$(echo "$_uci_cache" | awk -v net="@network_${net}[" '
+	function uq(s) {
+		sub(/[^=]*=/, "", s)
+		gsub(/\047\\\047\047/, "\001", s); gsub(/\047/, "", s); gsub(/\001/, "\047", s)
+		return s
+	}
+	index($0, net) {
+		match($0, /@network_[^.]+/)
+		id = substr($0, RSTART+9, RLENGTH-9)
+		f = $0; sub(/.*@network_[^.]+\./, "", f); sub(/=.*/, "", f)
+		v = uq($0)
+		if (f == "enable" && v == "1") en[id] = 1
+		else if (f == "timestart") ts[id] = v
+		else if (f == "timeend") te[id] = v
+		else if (f == "week") wk[id] = v
+	}
+	END { for (id in en) print id "|" ts[id] "|" te[id] "|" wk[id] }')
+
+	# Batch IDLIST writes: enable batch mode, add rules, flush once
+	_batch_mode=1; _pending_adds=""
+	local _rid _ts _te _wk
+	while IFS='|' read -r _rid _ts _te _wk; do
+		[ -n "$_rid" ] || continue
+		check_item "$_rid" "$_ts" "$_te" "$_wk" "$now_h" "$now_m" "$now_w" \
+			&& _add_rule "$_rid"
+	done <<EOF
+$_sched_data
+EOF
+	_idlist_batch_add "$_pending_adds"
+	_batch_mode=""; _pending_adds=""
 }
 
 case "$crrun" in
@@ -580,19 +636,25 @@ case "$crrun" in
 	;;
 	"add")
 		[ -n "$_uci_cache" ] || _uci_cache=$(uci show "$NAME" 2>/dev/null)
+		_batch_mode=1; _pending_adds=""
 		_oifs="$IFS"; IFS=,; set -f
 		for id in $crid ;do
 			_add_rule "$id"
 		done
 		IFS="$_oifs"; set +f
+		_idlist_batch_add "$_pending_adds"
+		_batch_mode=""; _pending_adds=""
 		bump_generation
 	;;
 	"del")
+		_batch_mode=1; _pending_dels=""
 		_oifs="$IFS"; IFS=,; set -f
 		for id in $crid ;do
 			del_id "$id"
 		done
 		IFS="$_oifs"; set +f
+		_idlist_batch_remove "$_pending_dels"
+		_batch_mode=""; _pending_dels=""
 		bump_generation
 	;;
 	"resync")

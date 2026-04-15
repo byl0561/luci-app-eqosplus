@@ -738,6 +738,50 @@ assert_fail "sched: cross-midnight workdays Sat 23:00 (Sat not in workdays)" \
 	check_item "test" "23:00" "06:00" "1,2,3,4,5" "23" "00" "6"
 
 echo ""
+echo "-- Set difference (grep -Fxvf, used by sync_networks) --"
+
+_test_setdiff_dir=$(mktemp -d "/tmp/eqosplus_test_setdiff.XXXXXX")
+_sd_a="$_test_setdiff_dir/a"
+_sd_b="$_test_setdiff_dir/b"
+_sd_out="$_test_setdiff_dir/out"
+
+# A-B: items in A but not in B (networks to start)
+printf 'lan\nguest\nwan\n' > "$_sd_a"
+printf 'lan\n' > "$_sd_b"
+grep -Fxvf "$_sd_b" "$_sd_a" > "$_sd_out"
+assert_file_content "setdiff: A-B basic" "$(printf 'guest\nwan')" "$_sd_out"
+
+# B-A: B is subset of A (nothing to stop)
+grep -Fxvf "$_sd_a" "$_sd_b" > "$_sd_out" || true
+assert_file_content "setdiff: B-A when B subset of A" "" "$_sd_out"
+
+# Identical sets (no diff)
+printf 'lan\nguest\n' > "$_sd_a"
+printf 'guest\nlan\n' > "$_sd_b"
+grep -Fxvf "$_sd_b" "$_sd_a" > "$_sd_out" || true
+assert_file_content "setdiff: identical sets" "" "$_sd_out"
+
+# B empty (all of A returned)
+printf 'lan\nguest\n' > "$_sd_a"
+> "$_sd_b"
+grep -Fxvf "$_sd_b" "$_sd_a" > "$_sd_out"
+assert_file_content "setdiff: B empty, all in A" "$(printf 'lan\nguest')" "$_sd_out"
+
+# A empty (nothing returned)
+> "$_sd_a"
+printf 'lan\n' > "$_sd_b"
+grep -Fxvf "$_sd_b" "$_sd_a" > "$_sd_out" || true
+assert_file_content "setdiff: A empty" "" "$_sd_out"
+
+# Both empty
+> "$_sd_a"
+> "$_sd_b"
+grep -Fxvf "$_sd_b" "$_sd_a" > "$_sd_out" || true
+assert_file_content "setdiff: both empty" "" "$_sd_out"
+
+rm -rf "$_test_setdiff_dir"
+
+echo ""
 echo "-- IDLIST & file helpers (from idlist_helpers.sh) --"
 
 # Load shared library with test-scoped dependency injection.
@@ -830,6 +874,31 @@ printf 'wlan[0]:br-wlan\nlan[0]:br-lan\n' > "$IDLIST"
 assert "_idlist_get_device: lan[0] not confused with wlan[0]" test "$(_idlist_get_device 'lan[0]')" = "br-lan"
 assert "_idlist_get_device: wlan[0] correct" test "$(_idlist_get_device 'wlan[0]')" = "br-wlan"
 
+echo "  -- _idlist_add_entry (atomic replace + append) --"
+
+# Basic add to empty IDLIST
+> "$IDLIST"
+_idlist_add_entry "lan[0]" "br-lan"
+assert_idlist "idlist_add: basic add to empty" "lan[0]:br-lan"
+
+# Add second entry
+_idlist_add_entry "guest[0]" "br-guest"
+assert_idlist "idlist_add: append second entry" "$(printf 'lan[0]:br-lan\nguest[0]:br-guest')"
+
+# Replace existing entry (device changed)
+_idlist_add_entry "lan[0]" "eth0"
+assert_idlist "idlist_add: replace existing entry" "$(printf 'guest[0]:br-guest\nlan[0]:eth0')"
+
+# Replace must not affect similarly-named IDs (lan[0] vs lan[00])
+printf 'lan[0]:br-lan\nlan[00]:br-lan\n' > "$IDLIST"
+_idlist_add_entry "lan[0]" "eth0"
+assert_idlist "idlist_add: no partial ID match on replace" "$(printf 'lan[00]:br-lan\nlan[0]:eth0')"
+
+# Add to file with existing entries preserves order of others
+printf 'a[0]:dev0\nc[0]:dev2\n' > "$IDLIST"
+_idlist_add_entry "b[0]" "dev1"
+assert_idlist "idlist_add: preserves existing order" "$(printf 'a[0]:dev0\nc[0]:dev2\nb[0]:dev1')"
+
 echo "  -- _file_remove_exact_line (fixed-string exact match) --"
 
 # Uses the same shared library (already loaded above)
@@ -865,6 +934,53 @@ assert_frel "frel: empty file stays empty" ""
 printf 'lan\nlan\n' > "$_test_frel_file"
 _file_remove_exact_line "$_test_frel_file" "lan"
 assert_frel "frel: remove all matching lines" ""
+
+echo "  -- _idlist_batch_add / _idlist_batch_remove --"
+
+# Batch add to empty IDLIST
+> "$IDLIST"
+_idlist_batch_add "$(printf 'lan[0]:br-lan\nlan[1]:br-lan\nguest[0]:br-guest')"
+assert_idlist "batch_add: multiple to empty" "$(printf 'lan[0]:br-lan\nlan[1]:br-lan\nguest[0]:br-guest')"
+
+# Batch add replaces existing entries
+printf 'lan[0]:br-lan\nguest[0]:br-guest\n' > "$IDLIST"
+_idlist_batch_add "$(printf 'lan[0]:eth0\nlan[2]:br-lan')"
+assert_idlist "batch_add: replace + append" "$(printf 'guest[0]:br-guest\nlan[0]:eth0\nlan[2]:br-lan')"
+
+# Batch add must not match partial IDs (lan[0] vs lan[00])
+printf 'lan[0]:br-lan\nlan[00]:br-lan\n' > "$IDLIST"
+_idlist_batch_add "$(printf 'lan[0]:eth0')"
+assert_idlist "batch_add: no partial ID match" "$(printf 'lan[00]:br-lan\nlan[0]:eth0')"
+
+# Batch add with empty input is no-op
+printf 'lan[0]:br-lan\n' > "$IDLIST"
+_idlist_batch_add ""
+assert_idlist "batch_add: empty input no-op" "lan[0]:br-lan"
+
+# Batch remove multiple entries
+printf 'lan[0]:br-lan\nlan[1]:br-lan\nguest[0]:br-guest\nguest[1]:br-guest\n' > "$IDLIST"
+_idlist_batch_remove "$(printf 'lan[0]\nguest[1]')"
+assert_idlist "batch_remove: multiple entries" "$(printf 'lan[1]:br-lan\nguest[0]:br-guest')"
+
+# Batch remove must not match partial IDs
+printf 'lan[0]:br-lan\nlan[00]:br-lan\nwlan[0]:br-wlan\n' > "$IDLIST"
+_idlist_batch_remove "$(printf 'lan[0]')"
+assert_idlist "batch_remove: no partial match" "$(printf 'lan[00]:br-lan\nwlan[0]:br-wlan')"
+
+# Batch remove non-existent IDs, no change
+printf 'lan[0]:br-lan\n' > "$IDLIST"
+_idlist_batch_remove "$(printf 'wan[0]\nguest[0]')"
+assert_idlist "batch_remove: non-existent no change" "lan[0]:br-lan"
+
+# Batch remove with empty input is no-op
+printf 'lan[0]:br-lan\n' > "$IDLIST"
+_idlist_batch_remove ""
+assert_idlist "batch_remove: empty input no-op" "lan[0]:br-lan"
+
+# Batch remove all entries
+printf 'lan[0]:br-lan\nguest[0]:br-guest\n' > "$IDLIST"
+_idlist_batch_remove "$(printf 'lan[0]\nguest[0]')"
+assert_idlist "batch_remove: all entries removed" ""
 
 rm -rf "$_test_idlist_dir"
 

@@ -1,0 +1,23 @@
+#!/bin/sh
+# POSIX timeout replacement for systems without coreutils timeout.
+# Usage: timeout_exec SECONDS COMMAND [ARGS...]
+# Runs COMMAND with a watchdog that kills it after SECONDS.
+# The watchdog's sleep is backgrounded and trapped so that
+# kill $wdog cleanly terminates both the subshell and sleep
+# (no orphaned sleep processes).
+secs=$1; shift
+"$@" &
+pid=$!
+(
+	trap 'kill $spid 2>/dev/null; exit 143' TERM
+	sleep "$secs" &
+	spid=$!
+	wait $spid
+	kill "$pid" 2>/dev/null
+) &
+wdog=$!
+wait "$pid" 2>/dev/null
+ret=$?
+kill "$wdog" 2>/dev/null
+wait "$wdog" 2>/dev/null
+exit $ret

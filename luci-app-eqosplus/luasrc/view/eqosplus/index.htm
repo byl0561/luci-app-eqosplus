@@ -4,6 +4,9 @@
 [id^="cbi-eqosplus-network_"].eqos-zone-visible { display: block !important; }
 </style>
 <script type="text/javascript">//<![CDATA[
+	// Log poll controls — assigned inside tab IIFE, used by visibilitychange handler
+	var startLogPoll, stopLogPoll;
+
 	// --- Zone -> network mapping (from firewall config) ---
 	var eqosZoneMap = <%
 		local json = require("luci.jsonc")
@@ -20,30 +23,39 @@
 	%>;
 
 	// --- Dynamic zone visibility: show/hide network sections based on multi-select ---
+	// Wrapped with readyState check: CBI form elements may not exist yet when this
+	// script tag is parsed (P5 fix — mirrors the pattern used by initAlwaysCheckboxes).
 	(function() {
-		var sel = document.querySelector('select[name$=".enabled_zones"]');
-		if (!sel) return;
-		function syncVisibility() {
-			var selected = {};
-			for (var i = 0; i < sel.options.length; i++) {
-				if (sel.options[i].selected) selected[sel.options[i].value] = true;
-			}
-			for (var zone in eqosZoneMap) {
-				var nets = eqosZoneMap[zone];
-				for (var j = 0; j < nets.length; j++) {
-					var sec = document.getElementById('cbi-eqosplus-network_' + nets[j]);
-					if (sec) {
-						if (selected[zone]) {
-							sec.classList.add('eqos-zone-visible');
-						} else {
-							sec.classList.remove('eqos-zone-visible');
+		function initZoneVisibility() {
+			var sel = document.querySelector('select[name$=".enabled_zones"]');
+			if (!sel) return;
+			function syncVisibility() {
+				var selected = {};
+				for (var i = 0; i < sel.options.length; i++) {
+					if (sel.options[i].selected) selected[sel.options[i].value] = true;
+				}
+				for (var zone in eqosZoneMap) {
+					var nets = eqosZoneMap[zone];
+					for (var j = 0; j < nets.length; j++) {
+						var sec = document.getElementById('cbi-eqosplus-network_' + nets[j]);
+						if (sec) {
+							if (selected[zone]) {
+								sec.classList.add('eqos-zone-visible');
+							} else {
+								sec.classList.remove('eqos-zone-visible');
+							}
 						}
 					}
 				}
 			}
+			sel.addEventListener('change', syncVisibility);
+			syncVisibility();
 		}
-		sel.addEventListener('change', syncVisibility);
-		syncVisibility();
+		if (document.readyState === 'loading') {
+			document.addEventListener('DOMContentLoaded', initZoneVisibility);
+		} else {
+			initZoneVisibility();
+		}
 	})();
 	// --- Tab setup ---
 	(function() {
@@ -106,10 +118,12 @@
 				(tab === 'debug') ? '' : 'none';
 		}
 
-		// Log polling state: only poll when Debug tab is active
+		// Log polling state: only poll when Debug tab is active.
+		// startLogPoll/stopLogPoll are assigned to outer-scope vars so the
+		// visibilitychange handler (outside this IIFE) can access them.
 		var logPollActive = false;
 		var logPollFn = null;
-		function startLogPoll() {
+		startLogPoll = function() {
 			if (logPollActive) return;
 			logPollActive = true;
 			logPollFn = function (x, result) {
@@ -120,15 +134,15 @@
 				}
 			};
 			XHR.poll(5, '<%=luci.dispatcher.build_url("admin", "network", "eqosplus", "get_log")%>', null, logPollFn);
-		}
-		function stopLogPoll() {
+		};
+		stopLogPoll = function() {
 			if (!logPollActive) return;
 			logPollActive = false;
 			if (logPollFn) {
 				XHR.stop(logPollFn);
 				logPollFn = null;
 			}
-		}
+		};
 
 		document.getElementById('eqos-tab-config').onclick = function() { switchTab('config'); stopLogPoll(); };
 		document.getElementById('eqos-tab-debug').onclick = function() { switchTab('debug'); startLogPoll(); };
@@ -190,22 +204,46 @@
 	})();
 
 	// --- Status polling ---
-	XHR.poll(5, '<%=luci.dispatcher.build_url("admin", "network", "eqosplus", "status")%>', null,
-		function (x, result) {
-			var status = document.getElementsByClassName('eqosplus_status')[0];
-			if (!status || !result) return;
-			status.setAttribute("style", "font-weight:bold;");
-			if (result.warning === "turboacc") {
-				status.setAttribute("color", "orange");
-				status.innerHTML = '<%=translate("NOT RUNNING")%> - <%=translate("turboacc flow offloading conflict, please disable sw_flow/sfe_flow")%>';
-			} else {
-				status.setAttribute("color", result.status ? "green" : "red");
-				status.innerHTML = result.status ? '<%=translate("RUNNING")%>' : '<%=translate("NOT RUNNING")%>';
+	var statusPollFn = function (x, result) {
+		var status = document.getElementsByClassName('eqosplus_status')[0];
+		if (!status || !result) return;
+		status.setAttribute("style", "font-weight:bold;");
+		if (result.warning === "turboacc") {
+			status.style.color = "orange";
+			status.textContent = '<%=translate("NOT RUNNING")%> - <%=translate("turboacc flow offloading conflict, please disable sw_flow/sfe_flow")%>';
+		} else {
+			status.style.color = result.status ? "green" : "red";
+			status.textContent = result.status ? '<%=translate("RUNNING")%>' : '<%=translate("NOT RUNNING")%>';
+		}
+	};
+	var statusPollUrl = '<%=luci.dispatcher.build_url("admin", "network", "eqosplus", "status")%>';
+	var statusPollActive = false;
+	// Shared helper: start status poll only if not already active (prevents
+	// duplicate pollers on repeated visibilitychange cycles — P4 fix).
+	function startStatusPoll() {
+		if (statusPollActive) return;
+		statusPollActive = true;
+		XHR.poll(5, statusPollUrl, null, statusPollFn);
+	}
+	function stopStatusPoll() {
+		if (!statusPollActive) return;
+		statusPollActive = false;
+		XHR.stop(statusPollFn);
+	}
+	startStatusPoll();
+
+	// Pause all polling when page/tab is hidden to save router resources
+	document.addEventListener('visibilitychange', function() {
+		if (document.hidden) {
+			stopStatusPoll();
+			stopLogPoll();
+		} else {
+			startStatusPoll();
+			if (document.getElementById('eqos-tab-debug').className === 'cbi-tab') {
+				startLogPoll();
 			}
 		}
-	);
-
-	// Log polling is started/stopped by tab switching (see startLogPoll/stopLogPoll above)
+	});
 
 	// --- Run diagnostics ---
 	function runDiag() {
@@ -222,13 +260,41 @@
 		);
 	}
 
+	// --- Test execution helpers ---
+	// Global mutex: prevents concurrent opkg/test operations that could
+	// corrupt the package database (P6 fix).
+	var _testBtnIds = ['btn_test', 'btn_traffic_test'];
+	var _testRunning = false;
+	function _setAllTestBtns(disabled) {
+		for (var i = 0; i < _testBtnIds.length; i++) {
+			var b = document.getElementById(_testBtnIds[i]);
+			if (b) b.disabled = disabled;
+		}
+	}
+	function _testDone(btn, out, origLabel, result) {
+		out.value = (result && result.output) || '<%=translate("No output")%>';
+		btn.value = origLabel;
+		_testRunning = false;
+		_setAllTestBtns(false);
+	}
+
+	function doRunTest(btn, out, origLabel, testUrl) {
+		btn.value = '<%=translate("Running...")%>';
+		out.value = '<%=translate("Running tests, please wait...")%>';
+		XHR.get(testUrl, null, function(x, r) {
+			_testDone(btn, out, origLabel, r);
+		});
+	}
+
 	// --- Generic: check single dep -> install if needed -> run test ---
 	function runTestWithDep(btnId, depPkg, testUrl) {
+		if (_testRunning) return;
 		var btn = document.getElementById(btnId);
 		var out = document.getElementById('eqosplus_test_output');
 		if (!btn || !out) return;
+		_testRunning = true;
+		_setAllTestBtns(true);
 		var origLabel = btn.getAttribute('data-label');
-		btn.disabled = true;
 		btn.value = '<%=translate("Checking...")%>';
 		out.value = '';
 
@@ -238,8 +304,9 @@
 		XHR.get(checkUrl, null, function(x, r) {
 			if (r && !r.installed) {
 				if (!confirm(depPkg + ' <%=translate("is not installed. Install now?")%>')) {
-					btn.disabled = false;
 					btn.value = origLabel;
+					_testRunning = false;
+					_setAllTestBtns(false);
 					return;
 				}
 				btn.value = '<%=translate("Installing...")%>';
@@ -247,8 +314,9 @@
 				XHR.get(installUrl, null, function(x, r2) {
 					if (!r2 || !r2.success) {
 						out.value = (r2 && r2.output) || '<%=translate("Install failed")%>';
-						btn.disabled = false;
 						btn.value = origLabel;
+						_testRunning = false;
+						_setAllTestBtns(false);
 						return;
 					}
 					doRunTest(btn, out, origLabel, testUrl);
@@ -259,23 +327,15 @@
 		});
 	}
 
-	function doRunTest(btn, out, origLabel, testUrl) {
-		btn.value = '<%=translate("Running...")%>';
-		out.value = '<%=translate("Running tests, please wait...")%>';
-		XHR.get(testUrl, null, function(x, r) {
-			out.value = (r && r.output) || '<%=translate("No output")%>';
-			btn.disabled = false;
-			btn.value = origLabel;
-		});
-	}
-
 	// --- Check multiple deps -> install missing -> run test ---
 	function runTestWithDeps(btnId, depPkgs, testUrl) {
+		if (_testRunning) return;
 		var btn = document.getElementById(btnId);
 		var out = document.getElementById('eqosplus_test_output');
 		if (!btn || !out) return;
+		_testRunning = true;
+		_setAllTestBtns(true);
 		var origLabel = btn.getAttribute('data-label');
-		btn.disabled = true;
 		btn.value = '<%=translate("Checking...")%>';
 		out.value = '';
 
@@ -285,8 +345,9 @@
 			if (r && r.missing && r.missing.length > 0) {
 				var pkgList = r.missing.join(', ');
 				if (!confirm(pkgList + ' <%=translate("is not installed. Install now?")%>')) {
-					btn.disabled = false;
 					btn.value = origLabel;
+					_testRunning = false;
+					_setAllTestBtns(false);
 					return;
 				}
 				btn.value = '<%=translate("Installing...")%>';
@@ -295,8 +356,9 @@
 				XHR.get(installUrl, null, function(x, r2) {
 					if (!r2 || !r2.success) {
 						out.value = (r2 && r2.output) || '<%=translate("Install failed")%>';
-						btn.disabled = false;
 						btn.value = origLabel;
+						_testRunning = false;
+						_setAllTestBtns(false);
 						return;
 					}
 					doRunTest(btn, out, origLabel, testUrl);

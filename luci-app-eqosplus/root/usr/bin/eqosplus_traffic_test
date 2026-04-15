@@ -69,7 +69,7 @@ DL_BEFORE=${DL_BEFORE:-0}
 UL_BEFORE=${UL_BEFORE:-0}
 
 # Send traffic: ping with large packets from client
-ip netns exec $TEST_NS ping -c 10 -s 1400 -i 0.1 -W 2 $HOST_IP >/dev/null 2>&1
+ip netns exec $TEST_NS ping -c 10 -s 1400 -W 2 $HOST_IP >/dev/null 2>&1
 
 # Check counters increased
 DL_AFTER=$(tc -s class show dev $VETH_HOST classid 1:1100 2>/dev/null | sed -n 's/.* Sent \([0-9]*\) .*/\1/p' | head -1)
@@ -89,28 +89,13 @@ assert "upload traffic hits rate-limited class" check_ul_counter
 
 echo ""
 echo "-- Rate limit verification --"
-echo "Sending 20KB @ 100kbit limit (~12.5KB/s), expect ~1.6s+"
+echo "Sending flood ping @ 100kbit limit (~12.5KB/s), expect overlimits"
 
-# Reset counters by noting current values
-DL_START=$(tc -s class show dev $VETH_HOST classid 1:1100 2>/dev/null | sed -n 's/.* Sent \([0-9]*\) .*/\1/p' | head -1)
-DL_START=${DL_START:-0}
+# Use ping flood to send enough data to trigger rate limiting
+# 200 x 1400 bytes = 280KB, well above 100kbit capacity
+ip netns exec $TEST_NS ping -f -c 200 -s 1400 -W 5 $HOST_IP >/dev/null 2>&1
 
-# Send 20KB from host to client (download direction)
-START_TIME=$(date +%s)
-dd if=/dev/zero bs=1K count=20 2>/dev/null | ip netns exec $TEST_NS nc -l -p 9999 -w 5 &
-BG_PID=$!
-sleep 0.5
-nc -w 5 $CLIENT_IP 9999 < /dev/zero &
-NC_PID=$!
-
-# Wait for transfer or timeout
-sleep 5
-kill $NC_PID $BG_PID 2>/dev/null
-wait $NC_PID $BG_PID 2>/dev/null
-END_TIME=$(date +%s)
-ELAPSED=$((END_TIME - START_TIME))
-
-# Alternative: just check that overlimits counter > 0 (proves rate limiting happened)
+# Check that overlimits counter > 0 (proves rate limiting happened)
 DL_OVERLIMITS=$(tc -s class show dev $VETH_HOST classid 1:1100 2>/dev/null | sed -n 's/.* overlimits \([0-9]*\) .*/\1/p' | head -1)
 DL_OVERLIMITS=${DL_OVERLIMITS:-0}
 

@@ -29,7 +29,7 @@ function act_status()
     local sys = require "luci.sys"
     local uci = require "luci.model.uci".cursor()
     local e = {}
-    e.status = sys.call("pgrep -x eqosplusctrl >/dev/null 2>&1") == 0
+    e.status = sys.call("pgrep -f '[e]qosplusctrl' >/dev/null 2>&1") == 0
     local sw = uci:get("turboacc", "config", "sw_flow") or "0"
     local sfe = uci:get("turboacc", "config", "sfe_flow") or "0"
     if sw == "1" or sfe == "1" then

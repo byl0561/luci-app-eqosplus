@@ -87,7 +87,6 @@ t.anonymous = true
 
 e = t:option(MultiValue, "enabled_zones", translate("Visible Networks"))
 e.delimiter = " "
-e.widget = "select"
 e.default = "lan"
 e.rmempty = false
 for zone_name, nets in pairs(zone_networks) do

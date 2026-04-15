@@ -3,7 +3,7 @@
 # Uses pgrep to detect if service is running (reliable across abnormal shutdowns).
 
 [ "$INTERFACE" = "loopback" ] && exit 0
-pgrep -x eqosplusctrl >/dev/null 2>&1 || exit 0
+pgrep -f '[e]qosplusctrl' >/dev/null 2>&1 || exit 0
 
 case "$ACTION" in
 	ifup)

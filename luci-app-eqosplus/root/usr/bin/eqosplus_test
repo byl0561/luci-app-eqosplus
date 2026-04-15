@@ -175,8 +175,9 @@ assert "bypass prio 101 created" tc_has filter show dev $TEST_DEV parent 1:
 PATTERN="fd00::/64"
 assert "bypass prio 102 created" tc_has filter show dev $TEST_DEV parent 1:
 
-# Device reuse: calling eqos_init_dev again on same device should not break it
-eqos_init_dev "$TEST_DEV" 2>/dev/null
+# Device reuse: production pattern — teardown then reinit (matches start_network)
+eqos_teardown_dev "$TEST_DEV"
+eqos_init_dev "$TEST_DEV"
 PATTERN="htb"
 assert "device reuse (HTB intact)" tc_has qdisc show dev $TEST_DEV
 PATTERN="$TEST_IFB"
@@ -203,6 +204,8 @@ eqos_add_ip "$TEST_DEV" "1104" "172.31.255.0/30" "20000" "10000"
 PATTERN="1:1104"
 assert "eqos_add_ip CIDR download" tc_has class show dev $TEST_DEV
 assert "eqos_add_ip CIDR upload" tc_has class show dev $TEST_IFB
+PATTERN="172.31.255.0/30"
+assert "eqos_add_ip CIDR /30 filter value" tc_has filter show dev $TEST_DEV parent 1:
 
 # Delete CIDR rule
 eqos_del_id "$TEST_DEV" "1104"
@@ -315,11 +318,14 @@ eqos_add_ip "$TEST_DEV" "1300" "$TEST_IP/32" "8000" "4000"
 PATTERN="1:1300"
 assert "CIDR /32 download class" tc_has class show dev $TEST_DEV
 assert "CIDR /32 upload class" tc_has class show dev $TEST_IFB
+PATTERN="dst_ip $TEST_IP"
+assert "CIDR /32 filter value" tc_has filter show dev $TEST_DEV parent 1:
 eqos_del_id "$TEST_DEV" "1300"
 
 # IP without CIDR notation (should default to /32)
+# tc omits /32 and shows bare host IP; any other prefix would show network address
 eqos_add_ip "$TEST_DEV" "1302" "$TEST_IP" "8000" "4000"
-PATTERN="$TEST_IP/32"
+PATTERN="dst_ip $TEST_IP"
 assert "bare IP defaults to /32" tc_has filter show dev $TEST_DEV parent 1:
 eqos_del_id "$TEST_DEV" "1302"
 
@@ -385,6 +391,8 @@ eqos_add_ip "$TEST_DEV" "1502" "fd00::/64" "20000" "10000"
 PATTERN="1:1502"
 assert "eqos_add_ip IPv6 CIDR /64 download" tc_has class show dev $TEST_DEV
 assert "eqos_add_ip IPv6 CIDR /64 upload" tc_has class show dev $TEST_IFB
+PATTERN="fd00::/64"
+assert "eqos_add_ip IPv6 CIDR /64 filter value" tc_has filter show dev $TEST_DEV parent 1:
 
 # Delete IPv6 rule
 eqos_del_id "$TEST_DEV" "1500"
@@ -397,11 +405,14 @@ eqos_add_ip "$TEST_DEV" "1504" "$TEST_IP6/128" "8000" "4000"
 PATTERN="1:1504"
 assert "IPv6 CIDR /128 download class" tc_has class show dev $TEST_DEV
 assert "IPv6 CIDR /128 upload class" tc_has class show dev $TEST_IFB
+PATTERN="dst_ip $TEST_IP6"
+assert "IPv6 CIDR /128 filter value" tc_has filter show dev $TEST_DEV parent 1:
 eqos_del_id "$TEST_DEV" "1504"
 
 # Bare IPv6 defaults to /128
+# tc omits /128 and shows bare host IP; any other prefix would show network address
 eqos_add_ip "$TEST_DEV" "1506" "$TEST_IP6" "8000" "4000"
-PATTERN="$TEST_IP6/128"
+PATTERN="dst_ip $TEST_IP6"
 assert "bare IPv6 defaults to /128" tc_has filter show dev $TEST_DEV parent 1:
 eqos_del_id "$TEST_DEV" "1506"
 

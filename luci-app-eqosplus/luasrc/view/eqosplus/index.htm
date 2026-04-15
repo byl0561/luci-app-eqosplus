@@ -2,6 +2,21 @@
 <style>
 [id^="cbi-eqosplus-network_"] { display: none; }
 [id^="cbi-eqosplus-network_"].eqos-zone-visible { display: block !important; }
+.eqos-multiselect { position: relative; display: inline-block; min-width: 200px; }
+.eqos-multiselect-toggle {
+	border: 1px solid #ccc; padding: 4px 8px; cursor: pointer;
+	background: #fff; white-space: nowrap;
+}
+.eqos-multiselect-toggle::after { content: " \25BE"; }
+.eqos-multiselect-dropdown {
+	display: none; position: absolute; z-index: 100;
+	border: 1px solid #ccc; background: #fff;
+	box-shadow: 0 2px 4px rgba(0,0,0,0.15);
+	min-width: 100%; white-space: nowrap;
+}
+.eqos-multiselect-dropdown label { display: block; padding: 4px 8px; margin: 0; cursor: pointer; }
+.eqos-multiselect-dropdown label:hover { background: #f0f0f0; }
+.eqos-multiselect.open .eqos-multiselect-dropdown { display: block; }
 </style>
 <script type="text/javascript">//<![CDATA[
 	// Log poll controls — assigned inside tab IIFE, used by visibilitychange handler
@@ -22,19 +37,62 @@
 		write(json.stringify(zmap))
 	%>;
 
-	// --- Dynamic zone visibility: show/hide network sections based on multi-select ---
-	// Wrapped with readyState check: CBI form elements may not exist yet when this
-	// script tag is parsed (P5 fix — mirrors the pattern used by initAlwaysCheckboxes).
+	// --- Dynamic zone visibility + checkbox dropdown panel ---
 	(function() {
-		function initZoneVisibility() {
-			var sel = document.querySelector('select[name$=".enabled_zones"]');
-			if (!sel) return;
-			// Show all options without scrollbar
-			if (sel.options.length > 0) sel.size = sel.options.length;
+		function initZoneDropdown() {
+			var cbs = document.querySelectorAll('input[type="checkbox"][name$=".enabled_zones"]');
+			if (!cbs.length) return;
+
+			// --- Build dropdown panel from CBI checkboxes ---
+			var field = cbs[0].parentNode.closest('.cbi-value-field') || cbs[0].parentNode;
+			var wrapper = document.createElement('div');
+			wrapper.className = 'eqos-multiselect';
+			var toggle = document.createElement('div');
+			toggle.className = 'eqos-multiselect-toggle';
+			var dropdown = document.createElement('div');
+			dropdown.className = 'eqos-multiselect-dropdown';
+
+			// Move checkbox labels into dropdown, remove <br> tags
+			var labels = field.querySelectorAll('label');
+			for (var i = 0; i < labels.length; i++) {
+				dropdown.appendChild(labels[i]);
+			}
+			var brs = field.querySelectorAll('br');
+			for (var i = 0; i < brs.length; i++) {
+				brs[i].parentNode.removeChild(brs[i]);
+			}
+
+			wrapper.appendChild(toggle);
+			wrapper.appendChild(dropdown);
+			field.appendChild(wrapper);
+
+			// Toggle open/close
+			toggle.addEventListener('click', function() {
+				wrapper.classList.toggle('open');
+			});
+			// Close on outside click
+			document.addEventListener('click', function(ev) {
+				if (!wrapper.contains(ev.target)) {
+					wrapper.classList.remove('open');
+				}
+			});
+
+			// --- Zone visibility sync ---
+			function updateToggleText() {
+				var names = [];
+				for (var i = 0; i < cbs.length; i++) {
+					if (cbs[i].checked) {
+						var lbl = cbs[i].parentNode;
+						names.push(lbl ? lbl.textContent.trim() : cbs[i].value);
+					}
+				}
+				toggle.textContent = names.length ? names.join(', ') : '<%=translate("-- Please choose --")%>';
+			}
+
 			function syncVisibility() {
 				var selected = {};
-				for (var i = 0; i < sel.options.length; i++) {
-					if (sel.options[i].selected) selected[sel.options[i].value] = true;
+				for (var i = 0; i < cbs.length; i++) {
+					if (cbs[i].checked) selected[cbs[i].value] = true;
 				}
 				for (var zone in eqosZoneMap) {
 					var nets = eqosZoneMap[zone];
@@ -50,14 +108,20 @@
 					}
 				}
 			}
-			sel.addEventListener('change', syncVisibility);
-			sel.addEventListener('click', syncVisibility);
+
+			for (var i = 0; i < cbs.length; i++) {
+				cbs[i].addEventListener('change', function() {
+					updateToggleText();
+					syncVisibility();
+				});
+			}
+			updateToggleText();
 			syncVisibility();
 		}
 		if (document.readyState === 'loading') {
-			document.addEventListener('DOMContentLoaded', initZoneVisibility);
+			document.addEventListener('DOMContentLoaded', initZoneDropdown);
 		} else {
-			initZoneVisibility();
+			initZoneDropdown();
 		}
 	})();
 	// --- Tab setup ---

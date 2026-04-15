@@ -11,8 +11,8 @@ NETWORKS="/var/$NAME.networks"
 GENERATION="/var/$NAME.generation"
 LOGFILE="/tmp/$NAME.log"
 LOG_LEVEL=$(uci -q get "$NAME.@eqosplus[0].log_level" 2>/dev/null || echo 0)
-bin_tc=/usr/sbin/tc
-bin_ip=/usr/sbin/ip
+bin_tc=$(command -v tc)
+bin_ip=$(command -v ip)
 
 LOCKFILE="/tmp/$NAME.op.lock"
 

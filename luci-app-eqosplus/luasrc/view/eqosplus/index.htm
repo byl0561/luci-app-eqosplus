@@ -29,6 +29,8 @@
 		function initZoneVisibility() {
 			var sel = document.querySelector('select[name$=".enabled_zones"]');
 			if (!sel) return;
+			// Show all options without scrollbar
+			if (sel.options.length > 0) sel.size = sel.options.length;
 			function syncVisibility() {
 				var selected = {};
 				for (var i = 0; i < sel.options.length; i++) {
@@ -49,6 +51,7 @@
 				}
 			}
 			sel.addEventListener('change', syncVisibility);
+			sel.addEventListener('click', syncVisibility);
 			syncVisibility();
 		}
 		if (document.readyState === 'loading') {

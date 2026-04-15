@@ -4,58 +4,121 @@
 # Copyright 2022-2025 lava <byl0561@gmail.com>
 NAME=eqosplus
 IDLIST="/var/$NAME.idlist"
+GENERATION="/var/$NAME.generation"
+CONF="/etc/config/$NAME"
+CACHE="/var/$NAME.sched_cache"
 
-idlist=`uci show $NAME | grep "enable='1'" | grep "network_" | grep -oE '@network_[^.]+' | sed 's/@network_//' `
+last_mtime=""
+cached_idlist=""
 
-check_item() {
-    id=$1
-	start_time=$(uci -q get $NAME.@network_$id.timestart 2>/dev/null)
-	end_time=$(uci -q get $NAME.@network_$id.timeend 2>/dev/null)
-	wweek=$(uci -q get $NAME.@network_$id.week)
-	current_time=$(date +%s)
-	current_weekday=$(date +%u)
+. /usr/lib/eqosplus/uci_helpers.sh
+. /usr/lib/eqosplus/sched.sh
 
-	start_seconds=$(date -d "$start_time" +%s)
-	end_seconds=$(date -d "$end_time" +%s)
-
-	if [ "$start_seconds" -ge "$end_seconds" ]; then
-		# Cross-midnight (e.g., 23:00-06:00)
-		if [ "$current_time" -lt "$start_seconds" ] && [ "$current_time" -gt "$end_seconds" ]; then
-			return 1
-		fi
-	else
-		# Same day (e.g., 08:00-18:00)
-		if [ "$current_time" -lt "$start_seconds" ] || [ "$current_time" -gt "$end_seconds" ]; then
-			return 1
-		fi
-	fi
-
-	for ww in $(echo $wweek | sed 's/,/ /g'); do
-		if [ "$current_weekday" -eq "$ww" ] || [ "x0" = "x$ww" ]; then
-			return 0
-		fi
-	done
-	return 1
+# Rebuild schedule cache from UCI config (single uci show + two awk passes, minimal forks)
+rebuild_cache() {
+	local uci_dump
+	uci_dump=$(uci show "$NAME" 2>/dev/null)
+	cached_idlist=$(echo "$uci_dump" | awk "/\.enable='1'/ && /@network_/ { match(\$0, /@network_[^.]+/); print substr(\$0, RSTART+9, RLENGTH-9) }")
+	# Build cache in one awk pass (BusyBox compatible): extract timestart/timeend/week
+	echo "$uci_dump" | awk -v ids="$cached_idlist" '
+	BEGIN {
+		n = split(ids, id_arr, /[ \n]+/)
+		for (i = 1; i <= n; i++) if (id_arr[i] != "") wanted[id_arr[i]] = 1
+	}
+	/@network_[^.]+\.(timestart|timeend|week)=/ {
+		# Extract id: between @network_ and next dot
+		s = $0; sub(/.*@network_/, "", s); sub(/\..*/, "", s); id = s
+		if (!(id in wanted)) next
+		# Extract field name: between id. and =
+		f = $0; sub(/.*@network_[^.]+\./, "", f); sub(/=.*/, "", f)
+		# Extract and unquote value
+		val = $0; sub(/[^=]*=/, "", val)
+		gsub(/\047\\\047\047/, "\001", val)
+		gsub(/\047/, "", val)
+		gsub(/\001/, "\047", val)
+		data[id "." f] = val
+	}
+	END {
+		for (i = 1; i <= n; i++) {
+			id = id_arr[i]
+			if (id != "" && id in wanted)
+				print id "|" data[id ".timestart"] "|" data[id ".timeend"] "|" data[id ".week"]
+		}
+	}' > "$CACHE"
 }
 
 idlistusr(){
-	[ -s $IDLIST ] || touch $IDLIST
-	for id in $idlist ;do
-		escaped_id=$(echo "$id" | sed 's/\[/\\[/g; s/\]/\\]/g')
-		if check_item $id; then
-			[ `cat $IDLIST  2>/dev/null | grep "${escaped_id}" | wc -l ` -gt 0 ] || { 
-				eqosplus add $id
-			}
+	[ -s "$IDLIST" ] || touch "$IDLIST"
+
+	# Reload cache if config file changed (stat for mtime; md5sum fallback
+	# detects any content change even when file size is unchanged)
+	local cur_mtime
+	cur_mtime=$(stat -c '%Y' "$CONF" 2>/dev/null || md5sum "$CONF" 2>/dev/null | awk '{print $1}')
+	if [ -z "$cur_mtime" ] || [ "$cur_mtime" != "$last_mtime" ]; then
+		rebuild_cache
+		last_mtime="$cur_mtime"
+	fi
+
+	# Get current time (single date fork for the entire poll cycle)
+	local now_h now_m now_w
+	read now_h now_m now_w <<EOF
+$(date +'%H %M %u')
+EOF
+
+	# Read generation before taking snapshot (detect concurrent start/restart)
+	local gen_before
+	gen_before=$(cat "$GENERATION" 2>/dev/null || echo 0)
+
+	# Build "|id1|id2|..." pattern for O(1) shell case matching (avoids N grep forks)
+	# IDLIST format: "id:device" — strip ":device" suffix to match rule IDs only
+	local idlist_pat="|"
+	local _line
+	while IFS= read -r _line; do
+		[ -n "$_line" ] && idlist_pat="${idlist_pat}${_line%%:*}|"
+	done < "$IDLIST" 2>/dev/null
+
+	# Collect changes first (batch), then apply
+	local adds="" dels=""
+	while IFS='|' read -r id ts te wk; do
+		[ -n "$id" ] || continue
+		if check_item "$id" "$ts" "$te" "$wk" "$now_h" "$now_m" "$now_w"; then
+			case "$idlist_pat" in
+				*"|${id}|"*) ;;
+				*) adds="${adds:+$adds,}$id" ;;
+			esac
 		else
-			[ `cat $IDLIST  2>/dev/null | grep "${escaped_id}" | wc -l ` -gt 0 ] && {
-				eqosplus del $id
-			}
+			case "$idlist_pat" in
+				*"|${id}|"*) dels="${dels:+$dels,}$id" ;;
+			esac
 		fi
-	done
+	done < "$CACHE" 2>/dev/null
+
+	# Skip if a start/restart occurred during our computation (stale snapshot)
+	local gen_after
+	gen_after=$(cat "$GENERATION" 2>/dev/null || echo 0)
+	if [ "$gen_before" != "$gen_after" ]; then
+		return
+	fi
+
+	# Apply batched changes (comma-separated IDs, single process each)
+	# On failure: log but continue; del failure must not block add.
+	# IDLIST is unchanged on failure so next cycle retries.
+	# timeout prevents daemon from blocking forever if eqosplus hangs (e.g. flock wait).
+	if [ -n "$dels" ]; then
+		timeout 30 eqosplus del "$dels" \
+			|| logger -t eqosplusctrl "del failed for: $dels, retry next cycle"
+	fi
+	if [ -n "$adds" ]; then
+		timeout 30 eqosplus add "$adds" \
+			|| logger -t eqosplusctrl "add failed for: $adds, retry next cycle"
+	fi
 }
 
+trap 'rm -f "$CACHE"; exit 0' EXIT TERM INT HUP
 
+# Run immediately on startup, then every 30 seconds
+idlistusr
 while :;do
-	idlistusr
 	sleep 30
+	idlistusr
 done

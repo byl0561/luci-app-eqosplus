@@ -7,8 +7,7 @@ START=99
 USE_PROCD=1
 
 NAME=eqosplus
-LOCKDIR="/tmp/$NAME.lock"
-CR=/etc/crontabs/root
+LOCKFILE="/tmp/$NAME.lock"
 
 start_instance() {
 	procd_open_instance
@@ -19,37 +18,46 @@ start_instance() {
 }
 
 _eqosplus_stop() {
-	kill $(busybox ps -w | grep 'eqosplusctrl' | grep -v 'grep' | awk '{print $1}') >/dev/null 2>&1
-	sed -i '/eqosplus/d' $CR >/dev/null 2>&1
 	eqosplus stop
 }
 
 _eqosplus_start() {
 	if [ "$(uci -q get $NAME.@eqosplus[0].service_enable)" = "1" ]; then
-		if [ x$(uci -q get turboacc.config.sw_flow) = 'x1' ] || [ x$(uci -q get turboacc.config.sfe_flow) = 'x1' ]; then
-			uci -q set turboacc.config.sw_flow='0'
-			uci -q set turboacc.config.sfe_flow='0'
-			uci -q set turboacc.config.hw_flow='0'
-			uci commit turboacc
-			/etc/init.d/turboacc restart
+		if [ "x$(uci -q get turboacc.config.sw_flow)" = 'x1' ] || [ "x$(uci -q get turboacc.config.sfe_flow)" = 'x1' ]; then
+			logger -t eqosplus "ERROR: turboacc flow offloading conflicts with eqosplus. QoS rules will be bypassed. Disable sw_flow/sfe_flow in turboacc first."
+			return 1
 		fi
-		eqosplus start
+		eqosplus start || { logger -t eqosplus "eqosplus start failed, not launching daemon"; return 1; }
 		start_instance
-		(crontab -l ; echo "00 1 * * * /etc/init.d/eqosplus start") | sort - | uniq - | crontab -
 	fi
 }
 
 start_service(){
-	mkdir $LOCKDIR 2>/dev/null || exit 0
+	# FD 200: service-level lock (prevents concurrent start/stop/reload).
+	# Must close explicitly — procd calls these functions in-process,
+	# so leaked FDs accumulate across service operations.
+	exec 200>"$LOCKFILE"
+	flock -w 15 200 || { exec 200>&-; logger -t eqosplus "start_service: could not acquire lock after 15s, skipping"; return 1; }
 	_eqosplus_stop
 	_eqosplus_start
+	exec 200>&-
 }
 
 service_triggers() {
 	procd_add_reload_trigger 'eqosplus'
 }
 
-stop_service(){
+reload_service() {
+	exec 200>"$LOCKFILE"
+	flock -w 15 200 || { exec 200>&-; logger -t eqosplus "reload_service: could not acquire lock"; return 1; }
 	_eqosplus_stop
-	rmdir $LOCKDIR 2>/dev/null
+	_eqosplus_start
+	exec 200>&-
+}
+
+stop_service(){
+	exec 200>"$LOCKFILE"
+	flock -w 15 200 || { exec 200>&-; logger -t eqosplus "stop_service: could not acquire lock"; return 1; }
+	_eqosplus_stop
+	exec 200>&-
 }

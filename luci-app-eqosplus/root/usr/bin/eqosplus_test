@@ -2,11 +2,19 @@
 # eqosplus structure test - uses dummy device, no real traffic
 # Requires: kmod-dummy
 
+# Load shared library (plain tc/ip, no logging)
+EQOS_TC=tc
+EQOS_IP=ip
+. /usr/lib/eqosplus/core.sh
+
 TEST_DEV="eqos_test0"
 TEST_IFB="${TEST_DEV}_ifb"
 TEST_MAC="02:00:00:00:00:01"
 TEST_IP="172.31.255.1"
-PASS=0; FAIL=0; TOTAL=0
+TEST_IP6="fd00::1"
+TEST_IP6_2="fd00::2"
+
+. /usr/lib/eqosplus/testlib.sh
 
 cleanup() {
 	tc qdisc del dev $TEST_DEV root 2>/dev/null
@@ -18,33 +26,12 @@ cleanup() {
 
 trap cleanup EXIT
 
-assert() {
-	local name="$1"; shift
-	TOTAL=$((TOTAL + 1))
-	if "$@" >/dev/null 2>&1; then
-		echo "PASS: $name"
-		PASS=$((PASS + 1))
-	else
-		echo "FAIL: $name"
-		FAIL=$((FAIL + 1))
-	fi
-}
-
-assert_fail() {
-	local name="$1"; shift
-	TOTAL=$((TOTAL + 1))
-	if ! "$@" >/dev/null 2>&1; then
-		echo "PASS: $name"
-		PASS=$((PASS + 1))
-	else
-		echo "FAIL: $name"
-		FAIL=$((FAIL + 1))
-	fi
-}
-
-# Verify a tc object exists by checking output contains a pattern
-tc_has() {
-	tc $* 2>/dev/null | grep -q "$PATTERN"
+# Cleanup, create dummy device, and init tc infrastructure
+fresh_init() {
+	cleanup
+	ip link add $TEST_DEV type dummy
+	ip link set $TEST_DEV up
+	eqos_init_dev "$TEST_DEV"
 }
 
 echo "=== eqosplus structure test ==="
@@ -54,7 +41,7 @@ echo ""
 ip link add $TEST_DEV type dummy || { echo "FAIL: cannot create dummy device (kmod-dummy installed?)"; exit 1; }
 ip link set $TEST_DEV up
 
-echo "-- Infrastructure --"
+echo "-- Infrastructure (low-level tc) --"
 
 # HTB root qdisc
 tc qdisc add dev $TEST_DEV root handle 1:0 htb default 1
@@ -64,7 +51,7 @@ tc qdisc del dev $TEST_DEV root
 
 # HTB class
 tc qdisc add dev $TEST_DEV root handle 1:0 htb default 1
-tc class add dev $TEST_DEV parent 1:0 classid 1:1 htb rate 80gbit prio 0 quantum 1500
+tc class add dev $TEST_DEV parent 1:0 classid 1:1 htb rate 10gbit prio 0 quantum 1500
 tc class add dev $TEST_DEV parent 1:1 classid 1:1100 htb rate 8000kbit ceil 8000kbit prio 1100 quantum 1500
 PATTERN="1:1100"
 assert "HTB class create" tc_has class show dev $TEST_DEV
@@ -76,14 +63,14 @@ assert "fq_codel leaf qdisc" tc_has qdisc show dev $TEST_DEV
 tc qdisc del dev $TEST_DEV root
 
 # IFB device
-ip link add dev $TEST_IFB name $TEST_IFB type ifb
+ip link add dev $TEST_IFB type ifb
 ip link set dev $TEST_IFB up
 PATTERN="$TEST_IFB"
 assert "IFB device create" ip link show $TEST_IFB
 
 # IFB qdisc
 tc qdisc add dev $TEST_IFB root handle 1:0 htb default 1
-tc class add dev $TEST_IFB parent 1:0 classid 1:1 htb rate 80gbit prio 0 quantum 1500
+tc class add dev $TEST_IFB parent 1:0 classid 1:1 htb rate 10gbit prio 0 quantum 1500
 PATTERN="htb"
 assert "IFB HTB qdisc" tc_has qdisc show dev $TEST_IFB
 
@@ -94,7 +81,7 @@ assert "fq_codel on default class" tc_has qdisc show dev $TEST_IFB
 
 # Ingress qdisc
 tc qdisc add dev $TEST_DEV root handle 1:0 htb default 1
-tc class add dev $TEST_DEV parent 1:0 classid 1:1 htb rate 80gbit prio 0 quantum 1500
+tc class add dev $TEST_DEV parent 1:0 classid 1:1 htb rate 10gbit prio 0 quantum 1500
 tc qdisc add dev $TEST_DEV ingress
 PATTERN="ingress"
 assert "ingress qdisc create" tc_has qdisc show dev $TEST_DEV
@@ -137,6 +124,21 @@ PATTERN="mirred"
 assert "mirred redirect to IFB" tc_has filter show dev $TEST_DEV parent ffff:
 
 echo ""
+echo "-- IPv6 flower classifier --"
+
+# flower dst_ip IPv6
+tc filter add dev $TEST_DEV parent 1: prio 1106 protocol ipv6 flower dst_ip $TEST_IP6/128 classid 1:1
+PATTERN="dst_ip"
+assert "flower dst_ip IPv6 filter" tc_has filter show dev $TEST_DEV parent 1:
+tc filter del dev $TEST_DEV pref 1106
+
+# flower src_ip IPv6 on IFB
+tc filter add dev $TEST_IFB parent 1: prio 1106 protocol ipv6 flower src_ip $TEST_IP6/128 classid 1:1100
+PATTERN="src_ip"
+assert "flower src_ip IPv6 filter" tc_has filter show dev $TEST_IFB parent 1:
+tc filter del dev $TEST_IFB pref 1106
+
+echo ""
 echo "-- CIDR subnet --"
 
 # flower dst_ip CIDR
@@ -152,74 +154,760 @@ assert "flower src_ip CIDR /30" tc_has filter show dev $TEST_IFB parent 1:
 tc filter del dev $TEST_IFB pref 1104
 
 echo ""
-echo "-- Full flows --"
+echo "-- Full flows (via core.sh) --"
 
-# Clean and rebuild for full flow tests
-tc filter del dev $TEST_DEV parent ffff: 2>/dev/null
-tc filter del dev $TEST_IFB parent 1:0 2>/dev/null
-tc filter del dev $TEST_DEV parent 1:0 2>/dev/null
-tc class del dev $TEST_IFB parent 1:1 classid 1:1100 2>/dev/null
+# Clean up and reinitialize using library
+fresh_init
+PATTERN="htb"
+assert "eqos_init_dev" tc_has qdisc show dev $TEST_DEV
 
-# Full MAC download: class + fq_codel + flower dst_mac
-tc class add dev $TEST_DEV parent 1:1 classid 1:1100 htb rate 8000kbit ceil 8000kbit prio 1100 quantum 1500
-tc qdisc add dev $TEST_DEV parent 1:1100 handle 1100: fq_codel
-tc filter add dev $TEST_DEV parent 1: prio 1100 protocol all flower dst_mac $TEST_MAC classid 1:1100
+# Bypass rule (prio 100, matching production start value)
+eqos_add_bypass "$TEST_DEV" "172.31.255.0/24" "ip" "100"
+PATTERN="172.31.255.0/24"
+assert "eqos_add_bypass src_ip filter (prio 100)" tc_has filter show dev $TEST_DEV parent 1:
+assert "eqos_add_bypass dst_ip filter (prio 100)" tc_has filter show dev $TEST_IFB parent 1:
+
+# Multiple bypass rules with consecutive prios
+eqos_add_bypass "$TEST_DEV" "10.0.0.0/8" "ip" "101"
+eqos_add_bypass "$TEST_DEV" "fd00::/64" "ipv6" "102"
+PATTERN="10.0.0.0/8"
+assert "bypass prio 101 created" tc_has filter show dev $TEST_DEV parent 1:
+PATTERN="fd00::/64"
+assert "bypass prio 102 created" tc_has filter show dev $TEST_DEV parent 1:
+
+# Device reuse: calling eqos_init_dev again on same device should not break it
+eqos_init_dev "$TEST_DEV" 2>/dev/null
+PATTERN="htb"
+assert "device reuse (HTB intact)" tc_has qdisc show dev $TEST_DEV
+PATTERN="$TEST_IFB"
+assert "device reuse (IFB intact)" ip link show $TEST_IFB
+
+# Full MAC rule: download 8000kbit + upload 4000kbit
+eqos_add_mac "$TEST_DEV" "1100" "$TEST_MAC" "8000" "4000"
 PATTERN="1:1100"
-assert "full MAC download flow" tc_has class show dev $TEST_DEV
+assert "eqos_add_mac download class" tc_has class show dev $TEST_DEV
+assert "eqos_add_mac upload class" tc_has class show dev $TEST_IFB
 
-# Full MAC upload: mirred + class + fq_codel + flower src_mac
-tc filter add dev $TEST_DEV parent ffff: prio 1100 protocol all flower src_mac $TEST_MAC action mirred egress redirect dev $TEST_IFB
-tc class add dev $TEST_IFB parent 1:1 classid 1:1100 htb rate 4000kbit ceil 4000kbit prio 1100 quantum 1500
-tc qdisc add dev $TEST_IFB parent 1:1100 handle 1100: fq_codel
-tc filter add dev $TEST_IFB parent 1: prio 1100 protocol all flower src_mac $TEST_MAC classid 1:1100
-PATTERN="1:1100"
-assert "full MAC upload flow" tc_has class show dev $TEST_IFB
-
-# Full IP download
-tc class add dev $TEST_DEV parent 1:1 classid 1:1102 htb rate 8000kbit ceil 8000kbit prio 1102 quantum 1500
-tc qdisc add dev $TEST_DEV parent 1:1102 handle 1102: fq_codel
-tc filter add dev $TEST_DEV parent 1: prio 1102 protocol ip flower dst_ip $TEST_IP/32 classid 1:1102
+# Full IP rule: download 8000kbit + upload 4000kbit
+eqos_add_ip "$TEST_DEV" "1102" "$TEST_IP" "8000" "4000"
 PATTERN="1:1102"
-assert "full IP download flow" tc_has class show dev $TEST_DEV
+assert "eqos_add_ip download class" tc_has class show dev $TEST_DEV
 
-# Full cleanup (simulate del_id)
-tc qdisc del dev $TEST_DEV parent 1:1100 2>/dev/null
-tc qdisc del dev $TEST_IFB parent 1:1100 2>/dev/null
-tc class del dev $TEST_DEV parent 1:1 classid 1:1100 2>/dev/null
-tc class del dev $TEST_IFB parent 1:1 classid 1:1100 2>/dev/null
-tc filter del dev $TEST_DEV parent ffff: prio 1100 2>/dev/null
-tc filter del dev $TEST_IFB pref 1100 2>/dev/null
-tc filter del dev $TEST_DEV pref 1100 2>/dev/null
+# Delete MAC rule
+eqos_del_id "$TEST_DEV" "1100"
 PATTERN="1:1100"
-assert_fail "full cleanup (class removed)" tc_has class show dev $TEST_DEV
+assert_fail "eqos_del_id MAC (class removed)" tc_has class show dev $TEST_DEV
 
-# Full CIDR shared download: entire /30 subnet shares one class
-tc class add dev $TEST_DEV parent 1:1 classid 1:1104 htb rate 20000kbit ceil 20000kbit prio 1104 quantum 1500
-tc qdisc add dev $TEST_DEV parent 1:1104 handle 1104: fq_codel
-tc filter add dev $TEST_DEV parent 1: prio 1104 protocol ip flower dst_ip 172.31.255.0/30 classid 1:1104
+# Full CIDR rule: download 20000kbit + upload 10000kbit
+eqos_add_ip "$TEST_DEV" "1104" "172.31.255.0/30" "20000" "10000"
 PATTERN="1:1104"
-assert "full CIDR /30 shared download" tc_has class show dev $TEST_DEV
+assert "eqos_add_ip CIDR download" tc_has class show dev $TEST_DEV
+assert "eqos_add_ip CIDR upload" tc_has class show dev $TEST_IFB
 
-# Full CIDR shared upload: mirred + IFB for /30
-tc filter add dev $TEST_DEV parent ffff: prio 1104 protocol ip flower src_ip 172.31.255.0/30 action mirred egress redirect dev $TEST_IFB
-tc class add dev $TEST_IFB parent 1:1 classid 1:1104 htb rate 10000kbit ceil 10000kbit prio 1104 quantum 1500
-tc qdisc add dev $TEST_IFB parent 1:1104 handle 1104: fq_codel
-tc filter add dev $TEST_IFB parent 1: prio 1104 protocol ip flower src_ip 172.31.255.0/30 classid 1:1104
+# Delete CIDR rule
+eqos_del_id "$TEST_DEV" "1104"
 PATTERN="1:1104"
-assert "full CIDR /30 shared upload" tc_has class show dev $TEST_IFB
+assert_fail "eqos_del_id CIDR (class removed)" tc_has class show dev $TEST_DEV
 
-# Cleanup CIDR rules
-tc qdisc del dev $TEST_DEV parent 1:1104 2>/dev/null
-tc qdisc del dev $TEST_IFB parent 1:1104 2>/dev/null
-tc class del dev $TEST_DEV parent 1:1 classid 1:1104 2>/dev/null
-tc class del dev $TEST_IFB parent 1:1 classid 1:1104 2>/dev/null
-tc filter del dev $TEST_DEV parent ffff: prio 1104 2>/dev/null
-tc filter del dev $TEST_IFB pref 1104 2>/dev/null
-tc filter del dev $TEST_DEV pref 1104 2>/dev/null
-PATTERN="1:1104"
-assert_fail "full CIDR cleanup" tc_has class show dev $TEST_DEV
+# Teardown
+eqos_teardown_dev "$TEST_DEV"
+PATTERN="htb"
+assert_fail "eqos_teardown_dev (qdisc removed)" tc_has qdisc show dev $TEST_DEV
 
 echo ""
-echo "========================"
-echo "Total: $TOTAL  Pass: $PASS  Fail: $FAIL"
-[ $FAIL -eq 0 ] && echo "ALL PASSED" || echo "SOME FAILED"
+echo "-- Idempotent add (re-add same/changed rule) --"
+
+fresh_init
+
+# Re-add MAC rule with same params: should succeed, rule intact
+eqos_add_mac "$TEST_DEV" "1900" "$TEST_MAC" "8000" "4000"
+PATTERN="1:1900"
+assert "idempotent MAC: first add DL" tc_has class show dev $TEST_DEV
+assert "idempotent MAC: first add UL" tc_has class show dev $TEST_IFB
+eqos_add_mac "$TEST_DEV" "1900" "$TEST_MAC" "8000" "4000"
+assert "idempotent MAC: second add DL intact" tc_has class show dev $TEST_DEV
+assert "idempotent MAC: second add UL intact" tc_has class show dev $TEST_IFB
+
+# Re-add MAC rule with different rate: new rate should take effect
+eqos_add_mac "$TEST_DEV" "1900" "$TEST_MAC" "16000" "8000"
+PATTERN="1:1900"
+assert "idempotent MAC: rate change class exists" tc_has class show dev $TEST_DEV
+eqos_del_id "$TEST_DEV" "1900"
+
+# Re-add IP rule with same params
+eqos_add_ip "$TEST_DEV" "1902" "$TEST_IP" "8000" "4000"
+PATTERN="1:1902"
+assert "idempotent IP: first add" tc_has class show dev $TEST_DEV
+eqos_add_ip "$TEST_DEV" "1902" "$TEST_IP" "8000" "4000"
+assert "idempotent IP: second add intact" tc_has class show dev $TEST_DEV
+
+# Other rules unaffected by idempotent re-add
+eqos_add_mac "$TEST_DEV" "1904" "$TEST_MAC" "6000" "3000"
+eqos_add_ip "$TEST_DEV" "1902" "$TEST_IP" "10000" "5000"
+PATTERN="1:1904"
+assert "idempotent: other MAC rule survives" tc_has class show dev $TEST_DEV
+PATTERN="1:1902"
+assert "idempotent: re-added IP rule exists" tc_has class show dev $TEST_DEV
+
+eqos_del_id "$TEST_DEV" "1902"
+eqos_del_id "$TEST_DEV" "1904"
+eqos_teardown_dev "$TEST_DEV"
+
+echo ""
+echo "-- Rate boundary values --"
+
+# Reinitialize for rate tests
+fresh_init
+
+# dl=0, ul=0: no class should be created
+eqos_add_mac "$TEST_DEV" "1200" "$TEST_MAC" "0" "0"
+PATTERN="1:1200"
+assert_fail "zero rate: no download class" tc_has class show dev $TEST_DEV
+assert_fail "zero rate: no upload class" tc_has class show dev $TEST_IFB
+
+# dl=0, ul=4000: only upload class
+eqos_add_mac "$TEST_DEV" "1202" "$TEST_MAC" "0" "4000"
+PATTERN="1:1202"
+assert_fail "dl=0: no download class" tc_has class show dev $TEST_DEV
+assert "dl=0: upload class created" tc_has class show dev $TEST_IFB
+eqos_del_id "$TEST_DEV" "1202"
+
+# dl=8000, ul=0: only download class
+eqos_add_mac "$TEST_DEV" "1204" "$TEST_MAC" "8000" "0"
+PATTERN="1:1204"
+assert "ul=0: download class created" tc_has class show dev $TEST_DEV
+assert_fail "ul=0: no upload class" tc_has class show dev $TEST_IFB
+eqos_del_id "$TEST_DEV" "1204"
+
+# Empty/invalid rate: should not crash (defensive validation)
+eqos_add_mac "$TEST_DEV" "1206" "$TEST_MAC" "" "" 2>/dev/null
+PATTERN="1:1206"
+assert_fail "empty rate: no download class" tc_has class show dev $TEST_DEV
+assert_fail "empty rate: no upload class" tc_has class show dev $TEST_IFB
+
+echo ""
+echo "-- HTB quantum calculation (_htb_quantum) --"
+
+# _htb_quantum sets $_quantum = rate_kbit*1000/8, clamped to [1500, 60000]
+_htb_quantum 1       # 1*1000/8=125 → clamped to 1500
+assert "_htb_quantum 1kbit → 1500 (min clamp)" [ "$_quantum" -eq 1500 ]
+
+_htb_quantum 12      # 12*1000/8=1500 → exact min boundary
+assert "_htb_quantum 12kbit → 1500 (exact min)" [ "$_quantum" -eq 1500 ]
+
+_htb_quantum 100     # 100*1000/8=12500
+assert "_htb_quantum 100kbit → 12500" [ "$_quantum" -eq 12500 ]
+
+_htb_quantum 480     # 480*1000/8=60000 → exact max boundary
+assert "_htb_quantum 480kbit → 60000 (exact max)" [ "$_quantum" -eq 60000 ]
+
+_htb_quantum 1000    # 1000*1000/8=125000 → clamped to 60000
+assert "_htb_quantum 1000kbit → 60000 (max clamp)" [ "$_quantum" -eq 60000 ]
+
+_htb_quantum 10000000 # 1250MB/s (10Gbps) max UI value → clamped to 60000
+assert "_htb_quantum 10000000kbit → 60000 (UI max)" [ "$_quantum" -eq 60000 ]
+
+echo ""
+echo "-- CIDR edge cases --"
+
+# /32 single address
+eqos_add_ip "$TEST_DEV" "1300" "$TEST_IP/32" "8000" "4000"
+PATTERN="1:1300"
+assert "CIDR /32 download class" tc_has class show dev $TEST_DEV
+assert "CIDR /32 upload class" tc_has class show dev $TEST_IFB
+eqos_del_id "$TEST_DEV" "1300"
+
+# IP without CIDR notation (should default to /32)
+eqos_add_ip "$TEST_DEV" "1302" "$TEST_IP" "8000" "4000"
+PATTERN="$TEST_IP/32"
+assert "bare IP defaults to /32" tc_has filter show dev $TEST_DEV parent 1:
+eqos_del_id "$TEST_DEV" "1302"
+
+echo ""
+echo "-- Multi-rule coexistence --"
+
+# Add MAC + IP rules simultaneously
+TEST_MAC2="02:00:00:00:00:02"
+TEST_IP2="172.31.255.2"
+
+eqos_add_mac "$TEST_DEV" "1400" "$TEST_MAC" "8000" "4000"
+eqos_add_mac "$TEST_DEV" "1402" "$TEST_MAC2" "6000" "3000"
+eqos_add_ip "$TEST_DEV" "1404" "$TEST_IP" "10000" "5000"
+eqos_add_ip "$TEST_DEV" "1406" "$TEST_IP2" "12000" "6000"
+
+PATTERN="1:1400"
+assert "multi-rule: MAC1 class exists" tc_has class show dev $TEST_DEV
+PATTERN="1:1402"
+assert "multi-rule: MAC2 class exists" tc_has class show dev $TEST_DEV
+PATTERN="1:1404"
+assert "multi-rule: IP1 class exists" tc_has class show dev $TEST_DEV
+PATTERN="1:1406"
+assert "multi-rule: IP2 class exists" tc_has class show dev $TEST_DEV
+
+# Delete one rule, others survive
+eqos_del_id "$TEST_DEV" "1402"
+PATTERN="1:1402"
+assert_fail "multi-rule: MAC2 removed" tc_has class show dev $TEST_DEV
+PATTERN="1:1400"
+assert "multi-rule: MAC1 survives" tc_has class show dev $TEST_DEV
+PATTERN="1:1404"
+assert "multi-rule: IP1 survives" tc_has class show dev $TEST_DEV
+PATTERN="1:1406"
+assert "multi-rule: IP2 survives" tc_has class show dev $TEST_DEV
+
+# Clean up remaining rules
+eqos_del_id "$TEST_DEV" "1400"
+eqos_del_id "$TEST_DEV" "1404"
+eqos_del_id "$TEST_DEV" "1406"
+
+# Teardown
+eqos_teardown_dev "$TEST_DEV"
+
+echo ""
+echo "-- IPv6 flows (via core.sh) --"
+
+fresh_init
+
+# IPv6 bypass
+eqos_add_bypass "$TEST_DEV" "fd00::/64" "ipv6" "10"
+PATTERN="fd00::/64"
+assert "eqos_add_bypass IPv6 src_ip" tc_has filter show dev $TEST_DEV parent 1:
+assert "eqos_add_bypass IPv6 dst_ip" tc_has filter show dev $TEST_IFB parent 1:
+
+# IPv6 full rule: download 8000kbit + upload 4000kbit
+eqos_add_ip "$TEST_DEV" "1500" "$TEST_IP6" "8000" "4000"
+PATTERN="1:1500"
+assert "eqos_add_ip IPv6 download class" tc_has class show dev $TEST_DEV
+assert "eqos_add_ip IPv6 upload class" tc_has class show dev $TEST_IFB
+
+# IPv6 CIDR /64
+eqos_add_ip "$TEST_DEV" "1502" "fd00::/64" "20000" "10000"
+PATTERN="1:1502"
+assert "eqos_add_ip IPv6 CIDR /64 download" tc_has class show dev $TEST_DEV
+assert "eqos_add_ip IPv6 CIDR /64 upload" tc_has class show dev $TEST_IFB
+
+# Delete IPv6 rule
+eqos_del_id "$TEST_DEV" "1500"
+PATTERN="1:1500"
+assert_fail "eqos_del_id IPv6 (class removed)" tc_has class show dev $TEST_DEV
+
+# IPv6 CIDR /128 single address
+eqos_del_id "$TEST_DEV" "1502"
+eqos_add_ip "$TEST_DEV" "1504" "$TEST_IP6/128" "8000" "4000"
+PATTERN="1:1504"
+assert "IPv6 CIDR /128 download class" tc_has class show dev $TEST_DEV
+assert "IPv6 CIDR /128 upload class" tc_has class show dev $TEST_IFB
+eqos_del_id "$TEST_DEV" "1504"
+
+# Bare IPv6 defaults to /128
+eqos_add_ip "$TEST_DEV" "1506" "$TEST_IP6" "8000" "4000"
+PATTERN="$TEST_IP6/128"
+assert "bare IPv6 defaults to /128" tc_has filter show dev $TEST_DEV parent 1:
+eqos_del_id "$TEST_DEV" "1506"
+
+eqos_teardown_dev "$TEST_DEV"
+
+echo ""
+echo "-- IPv4 + IPv6 coexistence --"
+
+fresh_init
+
+# Add IPv4 and IPv6 rules simultaneously
+eqos_add_ip "$TEST_DEV" "1600" "$TEST_IP" "8000" "4000"
+eqos_add_ip "$TEST_DEV" "1602" "$TEST_IP6" "6000" "3000"
+
+PATTERN="1:1600"
+assert "coexist: IPv4 class exists" tc_has class show dev $TEST_DEV
+PATTERN="1:1602"
+assert "coexist: IPv6 class exists" tc_has class show dev $TEST_DEV
+
+# Delete IPv6, IPv4 survives
+eqos_del_id "$TEST_DEV" "1602"
+PATTERN="1:1602"
+assert_fail "coexist: IPv6 removed" tc_has class show dev $TEST_DEV
+PATTERN="1:1600"
+assert "coexist: IPv4 survives" tc_has class show dev $TEST_DEV
+
+# Delete IPv4
+eqos_del_id "$TEST_DEV" "1600"
+PATTERN="1:1600"
+assert_fail "coexist: IPv4 removed" tc_has class show dev $TEST_DEV
+
+eqos_teardown_dev "$TEST_DEV"
+
+echo ""
+echo "-- IPv4-mapped IPv6 --"
+
+fresh_init
+
+# ::ffff:x.x.x.x should be treated as IPv4 (stripped to bare IPv4)
+eqos_add_ip "$TEST_DEV" "1700" "::ffff:$TEST_IP" "8000" "4000"
+PATTERN="1:1700"
+assert "IPv4-mapped IPv6: download class created" tc_has class show dev $TEST_DEV
+assert "IPv4-mapped IPv6: upload class created" tc_has class show dev $TEST_IFB
+# Verify the filter uses protocol ip (not ipv6)
+PATTERN="protocol ip"
+assert "IPv4-mapped IPv6: uses protocol ip" tc_has filter show dev $TEST_DEV parent 1:
+eqos_del_id "$TEST_DEV" "1700"
+
+# ::FFFF: (uppercase) should also be treated as IPv4
+eqos_add_ip "$TEST_DEV" "1702" "::FFFF:$TEST_IP" "8000" "4000"
+PATTERN="1:1702"
+assert "IPv4-mapped IPv6 uppercase: download class" tc_has class show dev $TEST_DEV
+assert "IPv4-mapped IPv6 uppercase: upload class" tc_has class show dev $TEST_IFB
+PATTERN="protocol ip"
+assert "IPv4-mapped IPv6 uppercase: uses protocol ip" tc_has filter show dev $TEST_DEV parent 1:
+eqos_del_id "$TEST_DEV" "1702"
+
+eqos_teardown_dev "$TEST_DEV"
+
+echo ""
+echo "-- Return value checks --"
+
+fresh_init
+
+# Invalid MAC should return non-zero
+assert_fail "invalid MAC rejected" eqos_add_mac "$TEST_DEV" "1800" "not-a-mac" "8000" "4000"
+
+# Invalid CIDR prefix should return non-zero
+assert_fail "invalid CIDR /0 rejected" eqos_add_ip "$TEST_DEV" "1802" "$TEST_IP/0" "8000" "4000"
+assert_fail "invalid CIDR /33 rejected" eqos_add_ip "$TEST_DEV" "1804" "$TEST_IP/33" "8000" "4000"
+assert_fail "invalid IPv6 CIDR /129 rejected" eqos_add_ip "$TEST_DEV" "1806" "$TEST_IP6/129" "8000" "4000"
+
+# Empty address should return non-zero
+assert_fail "empty IP rejected" eqos_add_ip "$TEST_DEV" "1808" "" "8000" "4000"
+assert_fail "empty MAC rejected" eqos_add_mac "$TEST_DEV" "1810" "" "8000" "4000"
+
+# is_macaddr: colon format
+assert "is_macaddr: colon format valid" is_macaddr "02:00:00:00:00:01"
+assert "is_macaddr: uppercase colon valid" is_macaddr "AA:BB:CC:DD:EE:FF"
+
+# is_macaddr: dash format
+assert "is_macaddr: dash format valid" is_macaddr "02-00-00-00-00-01"
+assert "is_macaddr: uppercase dash valid" is_macaddr "AA-BB-CC-DD-EE-FF"
+assert "is_macaddr: mixed case dash valid" is_macaddr "aA-Bb-Cc-Dd-Ee-Ff"
+
+# is_macaddr: invalid inputs
+assert_fail "is_macaddr: random string rejected" is_macaddr "not-a-mac"
+assert_fail "is_macaddr: empty rejected" is_macaddr ""
+assert_fail "is_macaddr: IP address rejected" is_macaddr "192.168.1.1"
+assert_fail "is_macaddr: too short rejected" is_macaddr "AA:BB:CC"
+assert_fail "is_macaddr: too long rejected" is_macaddr "AA:BB:CC:DD:EE:FF:00"
+assert_fail "is_macaddr: mixed separators rejected" is_macaddr "AA:BB-CC:DD-EE:FF"
+assert_fail "is_macaddr: invalid hex rejected" is_macaddr "GG:HH:II:JJ:KK:LL"
+
+# MAC with dash separator (should be normalized to colon)
+eqos_add_mac "$TEST_DEV" "1812" "02-00-00-00-00-03" "8000" "4000"
+PATTERN="1:1812"
+assert "MAC dash separator: class created" tc_has class show dev $TEST_DEV
+eqos_del_id "$TEST_DEV" "1812"
+
+# Uppercase MAC
+eqos_add_mac "$TEST_DEV" "1814" "AA:BB:CC:DD:EE:FF" "8000" "4000"
+PATTERN="1:1814"
+assert "uppercase MAC: class created" tc_has class show dev $TEST_DEV
+eqos_del_id "$TEST_DEV" "1814"
+
+# Negative CIDR prefix
+assert_fail "negative CIDR /-1 rejected" eqos_add_ip "$TEST_DEV" "1816" "$TEST_IP/-1" "8000" "4000"
+
+# Non-numeric CIDR prefix
+assert_fail "non-numeric CIDR /abc rejected" eqos_add_ip "$TEST_DEV" "1818" "$TEST_IP/abc" "8000" "4000"
+
+# Missing id parameter
+assert_fail "missing id: MAC" eqos_add_mac "$TEST_DEV" "" "$TEST_MAC" "8000" "4000"
+assert_fail "missing id: IP" eqos_add_ip "$TEST_DEV" "" "$TEST_IP" "8000" "4000"
+
+# Missing dev parameter
+assert_fail "missing dev: MAC" eqos_add_mac "" "1820" "$TEST_MAC" "8000" "4000"
+assert_fail "missing dev: IP" eqos_add_ip "" "1822" "$TEST_IP" "8000" "4000"
+
+# Delete non-existent id (should be silent, not crash)
+eqos_del_id "$TEST_DEV" "9999"
+PATTERN="htb"
+assert "del non-existent id: device intact" tc_has qdisc show dev $TEST_DEV
+
+eqos_teardown_dev "$TEST_DEV"
+
+echo ""
+echo "-- Bypass parameter validation --"
+
+fresh_init
+
+# Invalid protocol
+assert_fail "bypass: invalid proto rejected" eqos_add_bypass "$TEST_DEV" "10.0.0.0/8" "tcp" "200"
+
+# Missing parameters
+assert_fail "bypass: empty dev rejected" eqos_add_bypass "" "10.0.0.0/8" "ip" "200"
+assert_fail "bypass: empty subnet rejected" eqos_add_bypass "$TEST_DEV" "" "ip" "200"
+assert_fail "bypass: empty proto rejected" eqos_add_bypass "$TEST_DEV" "10.0.0.0/8" "" "200"
+assert_fail "bypass: empty prio rejected" eqos_add_bypass "$TEST_DEV" "10.0.0.0/8" "ip" ""
+
+eqos_teardown_dev "$TEST_DEV"
+
+echo ""
+echo "-- Empty device parameter handling --"
+
+# eqos_init_dev with empty device name
+assert_fail "init_dev: empty device rejected" eqos_init_dev ""
+
+# eqos_teardown_dev with empty device name
+assert_fail "teardown_dev: empty device rejected" eqos_teardown_dev ""
+
+# eqos_del_id with empty device
+assert_fail "del_id: empty device rejected" eqos_del_id "" "1100"
+
+# eqos_del_id with empty id
+assert_fail "del_id: empty id rejected" eqos_del_id "$TEST_DEV" ""
+
+echo ""
+echo "-- IFB name length check --"
+
+# Device names that would exceed 15-char IFB limit (dev + "_ifb" = max 15)
+# Max device name: 11 chars (11 + 4 = 15). 12 chars -> 16 chars -> rejected
+LONG_DEV="dev_123456789"  # 13 chars + "_ifb" = 17 chars -> should fail
+ip link add $LONG_DEV type dummy 2>/dev/null && ip link set $LONG_DEV up 2>/dev/null
+assert_fail "IFB name overflow: 17 chars rejected" eqos_init_dev "$LONG_DEV"
+ip link del $LONG_DEV 2>/dev/null
+
+# Exactly 15 chars IFB name should succeed
+OK_DEV="dev_1234567"  # 11 chars + "_ifb" = 15 chars -> should pass
+ip link add $OK_DEV type dummy 2>/dev/null && ip link set $OK_DEV up 2>/dev/null
+assert "IFB name exact 15 chars: accepted" eqos_init_dev "$OK_DEV"
+eqos_teardown_dev "$OK_DEV"
+ip link del $OK_DEV 2>/dev/null
+
+echo ""
+echo "-- Bypass + rule coexistence --"
+
+fresh_init
+
+# Add bypass at prio 100 and rule at prio 1100 on same parent 1:0
+eqos_add_bypass "$TEST_DEV" "172.31.255.0/24" "ip" "100"
+eqos_add_mac "$TEST_DEV" "1100" "$TEST_MAC" "8000" "4000"
+
+PATTERN="172.31.255.0/24"
+assert "bypass+rule: bypass filter exists" tc_has filter show dev $TEST_DEV parent 1:
+PATTERN="1:1100"
+assert "bypass+rule: rule class exists" tc_has class show dev $TEST_DEV
+
+# Delete rule, bypass survives
+eqos_del_id "$TEST_DEV" "1100"
+PATTERN="172.31.255.0/24"
+assert "bypass+rule: bypass survives rule delete" tc_has filter show dev $TEST_DEV parent 1:
+PATTERN="1:1100"
+assert_fail "bypass+rule: rule removed" tc_has class show dev $TEST_DEV
+
+eqos_teardown_dev "$TEST_DEV"
+
+echo ""
+echo "-- Teardown + reinit cycle --"
+
+cleanup
+ip link add $TEST_DEV type dummy
+ip link set $TEST_DEV up
+
+# First init + add rules
+eqos_init_dev "$TEST_DEV"
+eqos_add_mac "$TEST_DEV" "1100" "$TEST_MAC" "8000" "4000"
+eqos_add_ip "$TEST_DEV" "1102" "$TEST_IP" "6000" "3000"
+PATTERN="1:1100"
+assert "cycle: initial MAC rule" tc_has class show dev $TEST_DEV
+
+# Teardown
+eqos_teardown_dev "$TEST_DEV"
+PATTERN="htb"
+assert_fail "cycle: teardown removes qdisc" tc_has qdisc show dev $TEST_DEV
+
+# Reinit on same device
+eqos_init_dev "$TEST_DEV"
+PATTERN="htb"
+assert "cycle: reinit creates qdisc" tc_has qdisc show dev $TEST_DEV
+PATTERN="1:1100"
+assert_fail "cycle: old rules gone after reinit" tc_has class show dev $TEST_DEV
+
+# Add new rules on clean device
+eqos_add_mac "$TEST_DEV" "1200" "$TEST_MAC" "10000" "5000"
+PATTERN="1:1200"
+assert "cycle: new rule after reinit" tc_has class show dev $TEST_DEV
+assert "cycle: new rule upload after reinit" tc_has class show dev $TEST_IFB
+
+eqos_teardown_dev "$TEST_DEV"
+
+echo ""
+echo "-- Schedule logic (check_item from sched.sh) --"
+
+# Load schedule library for check_item tests
+. /usr/lib/eqosplus/sched.sh
+
+# check_item args: id timestart timeend weekdays cur_h cur_m cur_weekday
+# cur_weekday: 1=Mon .. 7=Sun (date +'%u' format)
+
+# Always active: 00:00-00:00
+assert "sched: 00:00-00:00 always active" check_item "test" "00:00" "00:00" "" "12" "00" "3"
+
+# Empty time fields = always active
+assert "sched: empty times always active" check_item "test" "" "" "" "12" "00" "3"
+
+# Same-day window: 08:00-18:00
+assert "sched: same-day 12:00 active" check_item "test" "08:00" "18:00" "" "12" "00" "3"
+assert_fail "sched: same-day 20:00 inactive" check_item "test" "08:00" "18:00" "" "20" "00" "3"
+assert_fail "sched: same-day 07:59 inactive" check_item "test" "08:00" "18:00" "" "07" "59" "3"
+assert "sched: same-day 08:00 boundary active" check_item "test" "08:00" "18:00" "" "08" "00" "3"
+assert_fail "sched: same-day 18:00 boundary inactive (end exclusive)" check_item "test" "08:00" "18:00" "" "18" "00" "3"
+
+# Cross-midnight window: 23:00-06:00
+assert "sched: cross-midnight 02:00 active" check_item "test" "23:00" "06:00" "" "02" "00" "3"
+assert "sched: cross-midnight 23:30 active" check_item "test" "23:00" "06:00" "" "23" "30" "3"
+assert_fail "sched: cross-midnight 12:00 inactive" check_item "test" "23:00" "06:00" "" "12" "00" "3"
+assert_fail "sched: cross-midnight 07:00 inactive" check_item "test" "23:00" "06:00" "" "07" "00" "3"
+
+# Zero-width window: same non-zero time = inactive
+assert_fail "sched: zero-width 12:00-12:00 inactive" check_item "test" "12:00" "12:00" "" "12" "00" "3"
+
+# Weekday: everyday (0)
+assert "sched: weekday 0 matches any day" check_item "test" "00:00" "00:00" "0" "12" "00" "1"
+assert "sched: weekday 0 matches Sunday" check_item "test" "00:00" "00:00" "0" "12" "00" "7"
+
+# Weekday: specific day
+assert "sched: Monday rule on Monday" check_item "test" "00:00" "00:00" "1" "12" "00" "1"
+assert_fail "sched: Monday rule on Tuesday" check_item "test" "00:00" "00:00" "1" "12" "00" "2"
+
+# Weekday: workdays (1,2,3,4,5)
+assert "sched: workdays on Wednesday" check_item "test" "00:00" "00:00" "1,2,3,4,5" "12" "00" "3"
+assert_fail "sched: workdays on Saturday" check_item "test" "00:00" "00:00" "1,2,3,4,5" "12" "00" "6"
+
+# Weekday: weekend (6,7)
+assert "sched: weekend on Saturday" check_item "test" "00:00" "00:00" "6,7" "12" "00" "6"
+assert "sched: weekend on Sunday" check_item "test" "00:00" "00:00" "6,7" "12" "00" "7"
+assert_fail "sched: weekend on Monday" check_item "test" "00:00" "00:00" "6,7" "12" "00" "1"
+
+# Bug 1 fix: cross-midnight + specific weekday
+# Rule: Monday 23:00-06:00. On Tuesday 02:00, should still be active (continuation of Monday night)
+assert "sched: cross-midnight Mon 23:00-06:00 active Mon 23:30" \
+	check_item "test" "23:00" "06:00" "1" "23" "30" "1"
+assert "sched: cross-midnight Mon 23:00-06:00 active Tue 02:00 (prev-day adjust)" \
+	check_item "test" "23:00" "06:00" "1" "02" "00" "2"
+assert_fail "sched: cross-midnight Mon 23:00-06:00 inactive Tue 23:30 (not Monday)" \
+	check_item "test" "23:00" "06:00" "1" "23" "30" "2"
+assert_fail "sched: cross-midnight Mon 23:00-06:00 inactive Wed 02:00 (prev=Tue, not Mon)" \
+	check_item "test" "23:00" "06:00" "1" "02" "00" "3"
+
+# Cross-midnight Sunday->Monday: rule for Sunday(7), at Monday 03:00 weekday=1, prev=7=Sun
+assert "sched: cross-midnight Sun 22:00-05:00 active Mon 03:00 (prev=Sun)" \
+	check_item "test" "22:00" "05:00" "7" "03" "00" "1"
+
+# Bug 3 fix: "0:XX" time format should work
+assert "sched: 0:00-6:00 active at 03:00" check_item "test" "0:00" "6:00" "" "03" "00" "3"
+assert_fail "sched: 0:00-6:00 inactive at 08:00" check_item "test" "0:00" "6:00" "" "08" "00" "3"
+assert "sched: 0:30-6:00 active at 02:00" check_item "test" "0:30" "6:00" "" "02" "00" "3"
+
+# Empty weekday = always active (any day)
+assert "sched: empty week active any day" check_item "test" "08:00" "18:00" "" "12" "00" "5"
+
+# Asymmetric empty time: only one field empty -> goes to else block, validation rejects
+assert_fail "sched: start empty end=18:00 rejected" check_item "test" "" "18:00" "" "12" "00" "3"
+assert_fail "sched: start=08:00 end empty rejected" check_item "test" "08:00" "" "" "12" "00" "3"
+
+# Malformed time values
+assert_fail "sched: malformed time 'ab:cd' rejected" check_item "test" "ab:cd" "18:00" "" "12" "00" "3"
+
+# Cross-midnight exact end boundary: at exactly end_seconds, still active
+assert_fail "sched: cross-midnight at exact end 06:00 inactive (end exclusive)" check_item "test" "23:00" "06:00" "" "06" "00" "3"
+# One minute after end: inactive
+assert_fail "sched: cross-midnight 06:01 inactive" check_item "test" "23:00" "06:00" "" "06" "01" "3"
+
+# Cross-midnight at exact start boundary
+assert "sched: cross-midnight at exact start 23:00 active" check_item "test" "23:00" "06:00" "" "23" "00" "3"
+
+# Zero-width window with weekday set (still inactive regardless of day)
+assert_fail "sched: zero-width 12:00-12:00 with weekday inactive" check_item "test" "12:00" "12:00" "3" "12" "00" "3"
+
+# Invalid weekday values (should not match any day)
+assert_fail "sched: weekday 8 never matches" check_item "test" "00:00" "00:00" "8" "12" "00" "1"
+assert_fail "sched: weekday 9 never matches" check_item "test" "00:00" "00:00" "9" "12" "00" "7"
+
+# Weekday 0 mixed with specific days (0 = everyday, should always match)
+assert "sched: weekday 0,3 matches Monday (0=everyday)" check_item "test" "00:00" "00:00" "0,3" "12" "00" "1"
+
+# Cross-midnight + workdays: Fri 23:00-06:00, Sat 02:00 (prev=Fri=5, in workdays)
+assert "sched: cross-midnight workdays Sat 02:00 (prev=Fri)" \
+	check_item "test" "23:00" "06:00" "1,2,3,4,5" "02" "00" "6"
+# Sat 23:00 should NOT match (Sat=6 not in workdays, not post-midnight portion)
+assert_fail "sched: cross-midnight workdays Sat 23:00 (Sat not in workdays)" \
+	check_item "test" "23:00" "06:00" "1,2,3,4,5" "23" "00" "6"
+
+echo ""
+echo "-- IDLIST & file helpers (from idlist_helpers.sh) --"
+
+# Load shared library with test-scoped dependency injection.
+# EQOS_MKTEMP → isolated temp dir; EQOS_LOG → no-op (tests don't log)
+_test_idlist_dir=$(mktemp -d "/tmp/eqosplus_test_idlist.XXXXXX")
+IDLIST="$_test_idlist_dir/idlist"
+_test_mktemp() {
+	local f
+	f=$(mktemp "$_test_idlist_dir/tmp.XXXXXX") || return 1
+	echo "$f"
+}
+EQOS_MKTEMP=_test_mktemp
+EQOS_LOG=:
+. /usr/lib/eqosplus/idlist_helpers.sh
+
+assert_idlist() { assert_file_content "$1" "$2" "$IDLIST"; }
+
+echo "  -- _idlist_remove_network prefix matching --"
+
+# Basic: remove single network's rules (format: "network[rule_id]:device")
+printf 'lan[0]:br-lan\nlan[1]:br-lan\nguest[0]:br-guest\n' > "$IDLIST"
+_idlist_remove_network "lan"
+assert_idlist "idlist_remove: basic lan removal" "guest[0]:br-guest"
+
+# Must not remove similarly-named networks (lan vs lan2)
+printf 'lan[0]:br-lan\nlan[1]:br-lan\nlan2[0]:br-lan2\nlan2[1]:br-lan2\n' > "$IDLIST"
+_idlist_remove_network "lan"
+assert_idlist "idlist_remove: lan vs lan2 no false match" "$(printf 'lan2[0]:br-lan2\nlan2[1]:br-lan2')"
+
+# Must not remove partial suffix matches (guest vs guest_5g)
+printf 'guest[0]:br-guest\nguest_5g[0]:br-guest5g\nguest_5g[1]:br-guest5g\n' > "$IDLIST"
+_idlist_remove_network "guest"
+assert_idlist "idlist_remove: guest vs guest_5g no false match" "$(printf 'guest_5g[0]:br-guest5g\nguest_5g[1]:br-guest5g')"
+
+# Network name with regex metacharacter (dot)
+printf 'vlan.100[0]:eth0.100\nvlan.100[1]:eth0.100\nvlan.1001[0]:eth0.1001\n' > "$IDLIST"
+_idlist_remove_network "vlan.100"
+assert_idlist "idlist_remove: dot in name exact match" "vlan.1001[0]:eth0.1001"
+
+# Network name with plus sign
+printf 'net+1[0]:br-net1\nnet+1[1]:br-net1\nnet+10[0]:br-net10\n' > "$IDLIST"
+_idlist_remove_network "net+1"
+assert_idlist "idlist_remove: plus in name exact match" "net+10[0]:br-net10"
+
+# Remove all entries (file becomes empty)
+printf 'lan[0]:br-lan\nlan[1]:br-lan\n' > "$IDLIST"
+_idlist_remove_network "lan"
+assert_idlist "idlist_remove: all entries removed" ""
+
+# Remove from empty file
+> "$IDLIST"
+_idlist_remove_network "lan"
+assert_idlist "idlist_remove: empty file stays empty" ""
+
+# Non-existent network (no lines removed)
+printf 'lan[0]:br-lan\nguest[0]:br-guest\n' > "$IDLIST"
+_idlist_remove_network "wan"
+assert_idlist "idlist_remove: non-existent network no change" "$(printf 'lan[0]:br-lan\nguest[0]:br-guest')"
+
+# Same network, different devices (all removed)
+printf 'lan[0]:br-lan\nlan[1]:eth0\nguest[0]:br-guest\n' > "$IDLIST"
+_idlist_remove_network "lan"
+assert_idlist "idlist_remove: same net different devices all removed" "guest[0]:br-guest"
+
+echo "  -- _idlist_remove_entry / _idlist_get_device --"
+
+# _idlist_remove_entry: remove by exact rule ID
+printf 'lan[0]:br-lan\nlan[1]:br-lan\nguest[0]:br-guest\n' > "$IDLIST"
+_idlist_remove_entry "lan[0]"
+assert_idlist "idlist_entry_remove: basic" "$(printf 'lan[1]:br-lan\nguest[0]:br-guest')"
+
+# _idlist_remove_entry: must not match partial IDs (lan[0] vs lan[00])
+printf 'lan[0]:br-lan\nlan[00]:br-lan\n' > "$IDLIST"
+_idlist_remove_entry "lan[0]"
+assert_idlist "idlist_entry_remove: no partial match" "lan[00]:br-lan"
+
+# _idlist_remove_entry: non-existent ID, no change
+printf 'lan[0]:br-lan\n' > "$IDLIST"
+_idlist_remove_entry "wan[0]"
+assert_idlist "idlist_entry_remove: non-existent no change" "lan[0]:br-lan"
+
+# _idlist_get_device: read stored device
+printf 'lan[0]:br-lan\nguest[0]:br-guest\n' > "$IDLIST"
+assert "_idlist_get_device: found" test "$(_idlist_get_device 'lan[0]')" = "br-lan"
+assert "_idlist_get_device: found guest" test "$(_idlist_get_device 'guest[0]')" = "br-guest"
+assert_fail "_idlist_get_device: not found" test -n "$(_idlist_get_device 'wan[0]')"
+
+# Regression: lan[0] must not match wlan[0] (prefix match, not substring)
+printf 'wlan[0]:br-wlan\nlan[0]:br-lan\n' > "$IDLIST"
+assert "_idlist_get_device: lan[0] not confused with wlan[0]" test "$(_idlist_get_device 'lan[0]')" = "br-lan"
+assert "_idlist_get_device: wlan[0] correct" test "$(_idlist_get_device 'wlan[0]')" = "br-wlan"
+
+echo "  -- _file_remove_exact_line (fixed-string exact match) --"
+
+# Uses the same shared library (already loaded above)
+_test_frel_file="$_test_idlist_dir/testfile"
+assert_frel() { assert_file_content "$1" "$2" "$_test_frel_file"; }
+
+# Basic: remove one line, others preserved
+printf 'lan\nguest\nwan\n' > "$_test_frel_file"
+_file_remove_exact_line "$_test_frel_file" "guest"
+assert_frel "frel: basic removal" "$(printf 'lan\nwan')"
+
+# Pattern with regex metacharacters treated as literal (lan[0] must not match lan0)
+printf 'lan[0]\nlan0\nlan[1]\n' > "$_test_frel_file"
+_file_remove_exact_line "$_test_frel_file" "lan[0]"
+assert_frel "frel: regex metachar treated as literal" "$(printf 'lan0\nlan[1]')"
+
+# Exact match only (no partial matching)
+printf 'lan\nlanguage\nplan\n' > "$_test_frel_file"
+_file_remove_exact_line "$_test_frel_file" "lan"
+assert_frel "frel: exact match only, no partial" "$(printf 'language\nplan')"
+
+# Pattern not found — file unchanged
+printf 'lan\nguest\n' > "$_test_frel_file"
+_file_remove_exact_line "$_test_frel_file" "wan"
+assert_frel "frel: pattern not found, no change" "$(printf 'lan\nguest')"
+
+# Empty file stays empty
+> "$_test_frel_file"
+_file_remove_exact_line "$_test_frel_file" "lan"
+assert_frel "frel: empty file stays empty" ""
+
+# Remove all lines
+printf 'lan\nlan\n' > "$_test_frel_file"
+_file_remove_exact_line "$_test_frel_file" "lan"
+assert_frel "frel: remove all matching lines" ""
+
+rm -rf "$_test_idlist_dir"
+
+echo ""
+echo "-- UCI unquote (_uci_unquote from uci_helpers.sh) --"
+
+# Load uci_helpers if not already loaded
+. /usr/lib/eqosplus/uci_helpers.sh
+
+# Helper to test _uci_unquote output
+assert_uq() {
+	local name=$1 input=$2 expected=$3
+	local actual
+	actual=$(echo "$input" | _uci_unquote)
+	TOTAL=$((TOTAL + 1))
+	if [ "$actual" = "$expected" ]; then
+		echo "PASS: $name"
+		PASS=$((PASS + 1))
+	else
+		echo "FAIL: $name (expected '$expected', got '$actual')"
+		FAIL=$((FAIL + 1))
+	fi
+}
+
+# Simple quoted value
+assert_uq "uci_unquote: simple value" "eqosplus.cfg.field='hello'" "hello"
+
+# Numeric value
+assert_uq "uci_unquote: numeric" "eqosplus.cfg.enable='1'" "1"
+
+# Multiple space-separated quoted values
+assert_uq "uci_unquote: multi-value" "eqosplus.cfg.zones='lan guest'" "lan guest"
+
+# Escaped single quote (UCI format: '\'' )
+assert_uq "uci_unquote: escaped quote" "eqosplus.cfg.val='it'\\''s'" "it's"
+
+# Empty value
+assert_uq "uci_unquote: empty value" "eqosplus.cfg.val=''" ""
+
+# Value with special characters
+assert_uq "uci_unquote: special chars" "eqosplus.cfg.mac='AA:BB:CC:DD:EE:FF'" "AA:BB:CC:DD:EE:FF"
+
+# Value with brackets (UCI section names)
+assert_uq "uci_unquote: brackets" "eqosplus.@network_lan[0].mac='192.168.1.1'" "192.168.1.1"
+
+test_report

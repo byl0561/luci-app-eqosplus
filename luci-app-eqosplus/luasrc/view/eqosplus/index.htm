@@ -1,35 +1,164 @@
 <% include("cbi/map") %>
 <script type="text/javascript">//<![CDATA[
-	// Status polling
-	XHR.poll(2, '<%=luci.dispatcher.build_url("admin", "services", "eqosplus", "status")%>', null,
+	// --- Tab setup ---
+	(function() {
+		var map = document.querySelector('.cbi-map');
+		if (!map) return;
+
+		// Collect all cbi-section elements (direct children of map)
+		var allSections = [];
+		var children = map.childNodes;
+		for (var i = 0; i < children.length; i++) {
+			if (children[i].nodeType === 1 && (
+				children[i].className || '').indexOf('cbi-section') !== -1) {
+				allSections.push(children[i]);
+			}
+		}
+		if (allSections.length < 2) return;
+
+		// sections[0] = Status + Enabled (always visible)
+		// sections[1..n-2] = network config (Configuration tab)
+		// sections[n-1] = Debug tab
+		var headerSection = allSections[0];
+		var debugSection = allSections[allSections.length - 1];
+		var configSections = [];
+		for (var i = 1; i < allSections.length - 1; i++) {
+			configSections.push(allSections[i]);
+		}
+
+		// Create tab bar
+		var tabMenu = document.createElement('ul');
+		tabMenu.className = 'cbi-tabmenu';
+		tabMenu.innerHTML =
+			'<li class="cbi-tab" id="eqos-tab-config"><a href="javascript:void(0)"><%=translate("Configuration")%></a></li>' +
+			'<li class="cbi-tab-disabled" id="eqos-tab-debug"><a href="javascript:void(0)"><%=translate("Debug")%></a></li>';
+		headerSection.parentNode.insertBefore(tabMenu, headerSection.nextSibling);
+
+		// Config container
+		var configDiv = document.createElement('div');
+		configDiv.id = 'eqos-content-config';
+		tabMenu.parentNode.insertBefore(configDiv, tabMenu.nextSibling);
+		for (var i = 0; i < configSections.length; i++) {
+			configDiv.appendChild(configSections[i]);
+		}
+
+		// Debug container (hidden by default)
+		var debugDiv = document.createElement('div');
+		debugDiv.id = 'eqos-content-debug';
+		debugDiv.style.display = 'none';
+		configDiv.parentNode.insertBefore(debugDiv, configDiv.nextSibling);
+		debugDiv.appendChild(debugSection);
+
+		// Tab switching
+		function switchTab(tab) {
+			document.getElementById('eqos-tab-config').className =
+				(tab === 'config') ? 'cbi-tab' : 'cbi-tab-disabled';
+			document.getElementById('eqos-tab-debug').className =
+				(tab === 'debug') ? 'cbi-tab' : 'cbi-tab-disabled';
+			document.getElementById('eqos-content-config').style.display =
+				(tab === 'config') ? '' : 'none';
+			document.getElementById('eqos-content-debug').style.display =
+				(tab === 'debug') ? '' : 'none';
+		}
+
+		// Log polling state: only poll when Debug tab is active
+		var logPollActive = false;
+		var logPollFn = null;
+		function startLogPoll() {
+			if (logPollActive) return;
+			logPollActive = true;
+			logPollFn = function (x, result) {
+				var el = document.getElementById('eqosplus_log');
+				if (el && result && result.log != null) {
+					el.value = result.log;
+					el.scrollTop = el.scrollHeight;
+				}
+			};
+			XHR.poll(5, '<%=luci.dispatcher.build_url("admin", "network", "eqosplus", "get_log")%>', null, logPollFn);
+		}
+		function stopLogPoll() {
+			if (!logPollActive) return;
+			logPollActive = false;
+			if (logPollFn) {
+				XHR.stop(logPollFn);
+				logPollFn = null;
+			}
+		}
+
+		document.getElementById('eqos-tab-config').onclick = function() { switchTab('config'); stopLogPoll(); };
+		document.getElementById('eqos-tab-debug').onclick = function() { switchTab('debug'); startLogPoll(); };
+	})();
+
+	// --- "All day" checkbox: lock timestart/timeend to 00:00 when checked ---
+	// Pure frontend: "always" is derived from timestart/timeend, not saved to UCI.
+	// Uses readonly (not disabled) so values still submit with the form.
+	(function() {
+		function toggleTimeFields(cb) {
+			var row = cb.closest('tr') || cb.closest('.cbi-section-table-row');
+			if (!row) return;
+			var inputs = row.querySelectorAll(
+				'input[id*=".timestart"], input[id*=".timeend"]'
+			);
+			for (var i = 0; i < inputs.length; i++) {
+				inputs[i].readOnly = cb.checked;
+				if (cb.checked) {
+					inputs[i].value = '00:00';
+					inputs[i].style.opacity = '0.5';
+				} else {
+					inputs[i].style.opacity = '';
+				}
+			}
+		}
+		function initAlwaysCheckboxes() {
+			var cbs = document.querySelectorAll(
+				'input[type="checkbox"][id*=".always"]'
+			);
+			for (var i = 0; i < cbs.length; i++) {
+				toggleTimeFields(cbs[i]);
+				if (!cbs[i].getAttribute('data-eqos-bound')) {
+					cbs[i].setAttribute('data-eqos-bound', '1');
+					(function(cb) {
+						cb.addEventListener('change', function() { toggleTimeFields(cb); });
+					})(cbs[i]);
+				}
+			}
+		}
+		if (document.readyState === 'loading') {
+			document.addEventListener('DOMContentLoaded', initAlwaysCheckboxes);
+		} else {
+			initAlwaysCheckboxes();
+		}
+		var observer = new MutationObserver(function() { initAlwaysCheckboxes(); });
+		var map = document.querySelector('.cbi-map');
+		if (map) observer.observe(map, { childList: true, subtree: true });
+	})();
+
+	// --- Status polling ---
+	XHR.poll(5, '<%=luci.dispatcher.build_url("admin", "network", "eqosplus", "status")%>', null,
 		function (x, result) {
 			var status = document.getElementsByClassName('eqosplus_status')[0];
-			if (!status) return;
+			if (!status || !result) return;
 			status.setAttribute("style", "font-weight:bold;");
-			status.setAttribute("color", result.status ? "green" : "red");
-			status.innerHTML = result.status ? '<%=translate("RUNNING")%>' : '<%=translate("NOT RUNNING")%>';
-		}
-	);
-
-	// Log polling (5s)
-	XHR.poll(5, '<%=luci.dispatcher.build_url("admin", "services", "eqosplus", "get_log")%>', null,
-		function (x, result) {
-			var el = document.getElementById('eqosplus_log');
-			if (el && result && result.log) {
-				el.value = result.log;
-				el.scrollTop = el.scrollHeight;
+			if (result.warning === "turboacc") {
+				status.setAttribute("color", "orange");
+				status.innerHTML = '<%=translate("NOT RUNNING")%> - <%=translate("turboacc flow offloading conflict, please disable sw_flow/sfe_flow")%>';
+			} else {
+				status.setAttribute("color", result.status ? "green" : "red");
+				status.innerHTML = result.status ? '<%=translate("RUNNING")%>' : '<%=translate("NOT RUNNING")%>';
 			}
 		}
 	);
 
-	// Run diagnostics
+	// Log polling is started/stopped by tab switching (see startLogPoll/stopLogPoll above)
+
+	// --- Run diagnostics ---
 	function runDiag() {
 		var btn = document.getElementById('btn_diag');
 		var out = document.getElementById('eqosplus_diag_output');
 		if (!btn || !out) return;
 		btn.disabled = true;
 		out.value = '<%=translate("Running...")%>';
-		XHR.get('<%=luci.dispatcher.build_url("admin", "services", "eqosplus", "diag")%>', null,
+		XHR.get('<%=luci.dispatcher.build_url("admin", "network", "eqosplus", "diag")%>', null,
 			function(x, r) {
 				out.value = (r && r.output) || '<%=translate("No output")%>';
 				btn.disabled = false;
@@ -37,7 +166,7 @@
 		);
 	}
 
-	// Generic: check dep -> install if needed -> run test
+	// --- Generic: check single dep -> install if needed -> run test ---
 	function runTestWithDep(btnId, depPkg, testUrl) {
 		var btn = document.getElementById(btnId);
 		var out = document.getElementById('eqosplus_test_output');
@@ -47,8 +176,8 @@
 		btn.value = '<%=translate("Checking...")%>';
 		out.value = '';
 
-		var checkUrl = '<%=luci.dispatcher.build_url("admin", "services", "eqosplus", "check_dep")%>?pkg=' + depPkg;
-		var installUrl = '<%=luci.dispatcher.build_url("admin", "services", "eqosplus", "install_dep")%>?pkg=' + depPkg;
+		var checkUrl = '<%=luci.dispatcher.build_url("admin", "network", "eqosplus", "check_dep")%>?pkg=' + encodeURIComponent(depPkg);
+		var installUrl = '<%=luci.dispatcher.build_url("admin", "network", "eqosplus", "install_dep")%>?pkg=' + encodeURIComponent(depPkg);
 
 		XHR.get(checkUrl, null, function(x, r) {
 			if (r && !r.installed) {
@@ -84,16 +213,54 @@
 		});
 	}
 
-	// Structure test (kmod-dummy)
-	function runTest() {
-		runTestWithDep('btn_test', 'kmod-dummy',
-			'<%=luci.dispatcher.build_url("admin", "services", "eqosplus", "run_test")%>');
+	// --- Check multiple deps -> install missing -> run test ---
+	function runTestWithDeps(btnId, depPkgs, testUrl) {
+		var btn = document.getElementById(btnId);
+		var out = document.getElementById('eqosplus_test_output');
+		if (!btn || !out) return;
+		var origLabel = btn.getAttribute('data-label');
+		btn.disabled = true;
+		btn.value = '<%=translate("Checking...")%>';
+		out.value = '';
+
+		var checkUrl = '<%=luci.dispatcher.build_url("admin", "network", "eqosplus", "check_deps")%>?pkgs=' + encodeURIComponent(depPkgs);
+
+		XHR.get(checkUrl, null, function(x, r) {
+			if (r && r.missing && r.missing.length > 0) {
+				var pkgList = r.missing.join(', ');
+				if (!confirm(pkgList + ' <%=translate("is not installed. Install now?")%>')) {
+					btn.disabled = false;
+					btn.value = origLabel;
+					return;
+				}
+				btn.value = '<%=translate("Installing...")%>';
+				out.value = '<%=translate("Updating package list and installing")%> ' + pkgList + '...';
+				var installUrl = '<%=luci.dispatcher.build_url("admin", "network", "eqosplus", "install_deps")%>?pkgs=' + encodeURIComponent(r.missing.join(','));
+				XHR.get(installUrl, null, function(x, r2) {
+					if (!r2 || !r2.success) {
+						out.value = (r2 && r2.output) || '<%=translate("Install failed")%>';
+						btn.disabled = false;
+						btn.value = origLabel;
+						return;
+					}
+					doRunTest(btn, out, origLabel, testUrl);
+				});
+			} else {
+				doRunTest(btn, out, origLabel, testUrl);
+			}
+		});
 	}
 
-	// Traffic test (kmod-veth)
+	// --- Structure test (kmod-dummy) ---
+	function runTest() {
+		runTestWithDep('btn_test', 'kmod-dummy',
+			'<%=luci.dispatcher.build_url("admin", "network", "eqosplus", "run_test")%>');
+	}
+
+	// --- Traffic test (ip-full, kmod-veth) ---
 	function runTrafficTest() {
-		runTestWithDep('btn_traffic_test', 'kmod-veth',
-			'<%=luci.dispatcher.build_url("admin", "services", "eqosplus", "run_traffic_test")%>');
+		runTestWithDeps('btn_traffic_test', 'ip-full,kmod-veth',
+			'<%=luci.dispatcher.build_url("admin", "network", "eqosplus", "run_traffic_test")%>');
 	}
 //]]>
 </script>

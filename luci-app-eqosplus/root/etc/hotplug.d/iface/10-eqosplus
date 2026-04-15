@@ -1,4 +1,22 @@
 #!/bin/sh
-# Restart eqosplus when any interface comes up (except loopback)
-# Uses lockdir as "service running" indicator to skip during initial boot
-[ "$ACTION" = "ifup" ] && [ "$INTERFACE" != "loopback" ] && [ -d /tmp/eqosplus.lock ] && /etc/init.d/eqosplus restart
+# Resync eqosplus when an active eqosplus network interface comes up or goes down.
+# Uses pgrep to detect if service is running (reliable across abnormal shutdowns).
+
+[ "$INTERFACE" = "loopback" ] && exit 0
+pgrep -x eqosplusctrl >/dev/null 2>&1 || exit 0
+
+case "$ACTION" in
+	ifup)
+		# Only resync if this interface is an active eqosplus-managed network
+		grep -qFx "$INTERFACE" /var/eqosplus.networks 2>/dev/null || exit 0
+		( sleep 3; eqosplus resync "$INTERFACE" ) &
+		;;
+	ifdown)
+		# When an interface goes down, its device may already be gone.
+		# resync will detect the missing device via get_net_device and clean up
+		# NETWORKS/IDLIST state. If the device later recovers, the ifup event
+		# will trigger another resync to restore QoS rules.
+		grep -qFx "$INTERFACE" /var/eqosplus.networks 2>/dev/null || exit 0
+		( eqosplus resync "$INTERFACE" ) &
+		;;
+esac

@@ -12,7 +12,7 @@ PKG_VERSION:=legacy-2.2.0
 PKG_RELEASE:=2
 
 LUCI_TITLE:=LuCI support for eqosplus.
-LUCI_DEPENDS:=+bash +tc +kmod-sched-core +kmod-ifb +kmod-sched +kmod-sched-flower +luci +luci-base +luci-compat
+LUCI_DEPENDS:=+tc +kmod-sched-core +kmod-ifb +kmod-sched +kmod-sched-flower +luci +luci-base +luci-compat
 LUCI_PKGARCH:=all
 
 PKG_MAINTAINER:=lava <byl0561@gmail.com>

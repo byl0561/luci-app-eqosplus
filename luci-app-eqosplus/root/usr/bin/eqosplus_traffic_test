@@ -1,6 +1,11 @@
 #!/bin/sh
 # eqosplus traffic test - uses veth + network namespace for real traffic
-# Requires: kmod-veth
+# Requires: kmod-veth, ip-full
+
+# Load shared library (plain tc/ip, no logging)
+EQOS_TC=tc
+EQOS_IP=ip
+. /usr/lib/eqosplus/core.sh
 
 TEST_NS="eqos_test_ns"
 VETH_HOST="eqos_vhost"
@@ -9,7 +14,8 @@ VETH_IFB="${VETH_HOST}_ifb"
 HOST_IP="172.31.255.1"
 CLIENT_IP="172.31.255.2"
 CLIENT_MAC=""
-PASS=0; FAIL=0; TOTAL=0
+
+. /usr/lib/eqosplus/testlib.sh
 
 cleanup() {
 	ip netns del $TEST_NS 2>/dev/null
@@ -18,18 +24,6 @@ cleanup() {
 }
 
 trap cleanup EXIT
-
-assert() {
-	local name="$1"; shift
-	TOTAL=$((TOTAL + 1))
-	if "$@" >/dev/null 2>&1; then
-		echo "PASS: $name"
-		PASS=$((PASS + 1))
-	else
-		echo "FAIL: $name"
-		FAIL=$((FAIL + 1))
-	fi
-}
 
 echo "=== eqosplus traffic test ==="
 echo ""
@@ -55,31 +49,13 @@ echo "-- Connectivity --"
 assert "veth ping connectivity" ip netns exec $TEST_NS ping -c 2 -W 2 $HOST_IP
 
 echo ""
-echo "-- TC setup --"
+echo "-- TC setup (via core.sh) --"
 
-# Setup HTB on host veth (download direction for client)
-tc qdisc add dev $VETH_HOST root handle 1:0 htb default 1
-tc class add dev $VETH_HOST parent 1:0 classid 1:1 htb rate 1gbit prio 0 quantum 1500
-tc qdisc add dev $VETH_HOST parent 1:1 fq_codel
+# Initialize tc infrastructure using library
+eqos_init_dev "$VETH_HOST"
 
-# Setup IFB for upload direction
-ip link add dev $VETH_IFB name $VETH_IFB type ifb
-ip link set dev $VETH_IFB up
-tc qdisc add dev $VETH_IFB root handle 1:0 htb default 1
-tc class add dev $VETH_IFB parent 1:0 classid 1:1 htb rate 1gbit prio 0 quantum 1500
-tc qdisc add dev $VETH_IFB parent 1:1 fq_codel
-tc qdisc add dev $VETH_HOST ingress
-
-# Add rate-limited class for download: 100kbit
-tc class add dev $VETH_HOST parent 1:1 classid 1:1100 htb rate 100kbit ceil 100kbit prio 1100 quantum 1500
-tc qdisc add dev $VETH_HOST parent 1:1100 handle 1100: fq_codel
-tc filter add dev $VETH_HOST parent 1: prio 1100 protocol all flower dst_mac $CLIENT_MAC classid 1:1100
-
-# Add rate-limited class for upload: 100kbit (mirred + IFB)
-tc filter add dev $VETH_HOST parent ffff: prio 1100 protocol all flower src_mac $CLIENT_MAC action mirred egress redirect dev $VETH_IFB
-tc class add dev $VETH_IFB parent 1:1 classid 1:1100 htb rate 100kbit ceil 100kbit prio 1100 quantum 1500
-tc qdisc add dev $VETH_IFB parent 1:1100 handle 1100: fq_codel
-tc filter add dev $VETH_IFB parent 1: prio 1100 protocol all flower src_mac $CLIENT_MAC classid 1:1100
+# Add rate-limited rule: 100kbit both directions
+eqos_add_mac "$VETH_HOST" "1100" "$CLIENT_MAC" "100" "100"
 
 echo "Rate limit: 100kbit (~12.5KB/s) both directions"
 echo ""
@@ -87,8 +63,8 @@ echo ""
 echo "-- Traffic class verification --"
 
 # Get initial counters
-DL_BEFORE=$(tc -s class show dev $VETH_HOST classid 1:1100 2>/dev/null | grep -oP 'Sent \K[0-9]+' | head -1)
-UL_BEFORE=$(tc -s class show dev $VETH_IFB classid 1:1100 2>/dev/null | grep -oP 'Sent \K[0-9]+' | head -1)
+DL_BEFORE=$(tc -s class show dev $VETH_HOST classid 1:1100 2>/dev/null | sed -n 's/.* Sent \([0-9]*\) .*/\1/p' | head -1)
+UL_BEFORE=$(tc -s class show dev $VETH_IFB classid 1:1100 2>/dev/null | sed -n 's/.* Sent \([0-9]*\) .*/\1/p' | head -1)
 DL_BEFORE=${DL_BEFORE:-0}
 UL_BEFORE=${UL_BEFORE:-0}
 
@@ -96,8 +72,8 @@ UL_BEFORE=${UL_BEFORE:-0}
 ip netns exec $TEST_NS ping -c 10 -s 1400 -i 0.1 -W 2 $HOST_IP >/dev/null 2>&1
 
 # Check counters increased
-DL_AFTER=$(tc -s class show dev $VETH_HOST classid 1:1100 2>/dev/null | grep -oP 'Sent \K[0-9]+' | head -1)
-UL_AFTER=$(tc -s class show dev $VETH_IFB classid 1:1100 2>/dev/null | grep -oP 'Sent \K[0-9]+' | head -1)
+DL_AFTER=$(tc -s class show dev $VETH_HOST classid 1:1100 2>/dev/null | sed -n 's/.* Sent \([0-9]*\) .*/\1/p' | head -1)
+UL_AFTER=$(tc -s class show dev $VETH_IFB classid 1:1100 2>/dev/null | sed -n 's/.* Sent \([0-9]*\) .*/\1/p' | head -1)
 DL_AFTER=${DL_AFTER:-0}
 UL_AFTER=${UL_AFTER:-0}
 
@@ -116,31 +92,60 @@ echo "-- Rate limit verification --"
 echo "Sending 20KB @ 100kbit limit (~12.5KB/s), expect ~1.6s+"
 
 # Reset counters by noting current values
-DL_START=$(tc -s class show dev $VETH_HOST classid 1:1100 2>/dev/null | grep -oP 'Sent \K[0-9]+' | head -1)
+DL_START=$(tc -s class show dev $VETH_HOST classid 1:1100 2>/dev/null | sed -n 's/.* Sent \([0-9]*\) .*/\1/p' | head -1)
 DL_START=${DL_START:-0}
 
 # Send 20KB from host to client (download direction)
 START_TIME=$(date +%s)
 dd if=/dev/zero bs=1K count=20 2>/dev/null | ip netns exec $TEST_NS nc -l -p 9999 -w 5 &
+BG_PID=$!
 sleep 0.5
 nc -w 5 $CLIENT_IP 9999 < /dev/zero &
 NC_PID=$!
 
 # Wait for transfer or timeout
 sleep 5
-kill $NC_PID 2>/dev/null
-wait 2>/dev/null
+kill $NC_PID $BG_PID 2>/dev/null
+wait $NC_PID $BG_PID 2>/dev/null
 END_TIME=$(date +%s)
 ELAPSED=$((END_TIME - START_TIME))
 
 # Alternative: just check that overlimits counter > 0 (proves rate limiting happened)
-DL_OVERLIMITS=$(tc -s class show dev $VETH_HOST classid 1:1100 2>/dev/null | grep -oP 'overlimits \K[0-9]+' | head -1)
+DL_OVERLIMITS=$(tc -s class show dev $VETH_HOST classid 1:1100 2>/dev/null | sed -n 's/.* overlimits \([0-9]*\) .*/\1/p' | head -1)
 DL_OVERLIMITS=${DL_OVERLIMITS:-0}
 
 check_overlimits() { [ "$DL_OVERLIMITS" -gt 0 ]; }
 assert "rate limiting active (overlimits > 0: $DL_OVERLIMITS)" check_overlimits
 
 echo ""
-echo "========================"
-echo "Total: $TOTAL  Pass: $PASS  Fail: $FAIL"
-[ $FAIL -eq 0 ] && echo "ALL PASSED" || echo "SOME FAILED"
+echo "-- IP-based rule traffic --"
+
+# Remove MAC rule, add IP-based rule instead
+eqos_del_id "$VETH_HOST" "1100"
+eqos_add_ip "$VETH_HOST" "1102" "$CLIENT_IP" "100" "100"
+
+# Get initial counters
+IP_DL_BEFORE=$(tc -s class show dev $VETH_HOST classid 1:1102 2>/dev/null | sed -n 's/.* Sent \([0-9]*\) .*/\1/p' | head -1)
+IP_DL_BEFORE=${IP_DL_BEFORE:-0}
+
+# Send traffic from client
+ip netns exec $TEST_NS ping -c 10 -s 1400 -i 0.1 -W 2 $HOST_IP >/dev/null 2>&1
+
+# Check counters increased
+IP_DL_AFTER=$(tc -s class show dev $VETH_HOST classid 1:1102 2>/dev/null | sed -n 's/.* Sent \([0-9]*\) .*/\1/p' | head -1)
+IP_DL_AFTER=${IP_DL_AFTER:-0}
+
+IP_DL_BYTES=$((IP_DL_AFTER - IP_DL_BEFORE))
+echo "IP rule download class bytes: $IP_DL_BYTES"
+
+check_ip_dl() { [ "$IP_DL_BYTES" -gt 0 ]; }
+assert "IP-based rule: traffic hits rate-limited class" check_ip_dl
+
+echo ""
+echo "-- Teardown verification --"
+
+eqos_teardown_dev "$VETH_HOST"
+PATTERN="htb"
+assert_fail "teardown: qdisc removed after test" tc_has qdisc show dev $VETH_HOST
+
+test_report

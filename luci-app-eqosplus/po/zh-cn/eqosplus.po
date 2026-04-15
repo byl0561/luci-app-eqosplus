@@ -125,3 +125,12 @@ msgstr "未运行"
 msgid "Configuration"
 msgstr "配置"
 
+msgid "turboacc flow offloading conflict, please disable sw_flow/sfe_flow"
+msgstr "turboacc 流量卸载冲突，请先关闭 sw_flow/sfe_flow"
+
+msgid "All day"
+msgstr "全天"
+
+msgid "Start time and end time must differ (use All day for 24h)"
+msgstr "起控时间和停控时间不能相同（全天限速请勾选"全天"）"
+

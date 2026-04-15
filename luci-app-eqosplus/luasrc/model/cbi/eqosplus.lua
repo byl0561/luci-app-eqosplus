@@ -1,11 +1,30 @@
 -- Copyright 2022-2025 lava <byl0561@gmail.com>
 -- Licensed to the public under the Apache License 2.0.
-local sys = require "luci.sys"
 local nw = require "luci.model.network".init()
-local interfaces = nw:get_interfaces()
 local ipc = require "luci.ip"
 local uci_cursor = require "luci.model.uci".cursor()
 local a, t, e
+
+-- Build zone -> networks map (exclude wan zone)
+local zone_networks = {}
+local net_to_zone = {}
+uci_cursor:foreach("firewall", "zone", function(z)
+	if z.name and z.name ~= "wan" then
+		local nets = z.network or {}
+		if type(nets) == "string" then nets = {nets} end
+		zone_networks[z.name] = nets
+		for _, n in ipairs(nets) do
+			net_to_zone[n] = z.name
+		end
+	end
+end)
+
+-- Read enabled zones from UCI (default: lan)
+local enabled_zones_str = uci_cursor:get("eqosplus", "@eqosplus[0]", "enabled_zones") or "lan"
+local enabled_zones = {}
+for z in enabled_zones_str:gmatch("%S+") do
+	enabled_zones[z] = true
+end
 
 -- Build hostname lookup from DHCP leases + static leases
 local hostnames = {}
@@ -28,8 +47,8 @@ uci_cursor:foreach("dhcp", "host", function(s)
 end)
 
 function validate_time(self, value, section)
-	local hh, mm, ss
-	hh, mm, ss = string.match (value, "^(%d?%d):(%d%d)$")
+	local hh, mm
+	hh, mm = string.match (value, "^(%d?%d):(%d%d)$")
 	hh = tonumber (hh)
 	mm = tonumber (mm)
 	if hh and mm and hh <= 23 and mm <= 59 then
@@ -39,10 +58,25 @@ function validate_time(self, value, section)
 	end
 end
 
+function validate_time_range(self, value, section)
+	local ok, err = validate_time(self, value, section)
+	if not ok then return nil, err end
+	local peer_field = (self.option == "timestart") and "timeend" or "timestart"
+	-- Read peer from form submission (not yet committed to UCI), fall back to saved value
+	local peer = luci.http.formvalue("cbid.eqosplus." .. section .. "." .. peer_field)
+		or uci_cursor:get("eqosplus", section, peer_field)
+		or "00:00"
+	if value == peer and value ~= "00:00" then
+		return nil, translate("Start time and end time must differ (use All day for 24h)")
+	end
+	return value
+end
+
 a = Map("eqosplus", translate("Network speed limit"))
 a.description = translate("Users can limit the network speed for uploading/downloading through MAC, IP. The speed unit is MB/second.")
 a.template = "eqosplus/index"
 
+-- Section: Status + Enabled (always visible above tabs)
 t = a:section(TypedSection, "eqosplus")
 t.anonymous = true
 
@@ -54,24 +88,57 @@ e = t:option(Flag, "service_enable", translate("Enabled"))
 e.rmempty = false
 e.size = 4
 
-e = t:option(ListValue, "log_level", translate("Log Level"))
-e:value("0", translate("Off"))
-e:value("1", translate("Error"))
-e:value("2", translate("Info"))
-e:value("3", translate("Debug"))
-e.default = "0"
-e.size = 4
+-- Section: Zone selector (top of Configuration tab)
+t = a:section(TypedSection, "eqosplus")
+t.anonymous = true
 
-for _, iface in ipairs(interfaces) do
-    local name = iface:name()
-    local net = iface:get_network()
+e = t:option(MultiValue, "enabled_zones", translate("Visible Networks"))
+e.widget = "checkbox"
+e.delimiter = " "
+e.default = "lan"
+e.rmempty = false
+for zone_name, nets in pairs(zone_networks) do
+	local net_list = table.concat(nets, ", ")
+	e:value(zone_name, zone_name:upper() .. " (" .. net_list .. ")")
+end
 
-    if net and net:name() then
-		local net_name = net:name()
-		t = a:section(TypedSection, "network_"..net_name, net_name:upper().." "..translate("Configuration"))
+e = t:option(Flag, "zone_bypass", translate("Same-zone bypass"))
+e.description = translate("Skip rate limiting for traffic between devices in the same firewall zone (e.g. LAN-to-LAN)")
+e.default = "1"
+e.rmempty = false
+
+-- Pre-fetch all neighbors once (avoid repeated ipc.neighbors calls per network)
+local all_neigh_v4, all_neigh_v6 = {}, {}
+ipc.neighbors({family = 4}, function(n) all_neigh_v4[#all_neigh_v4 + 1] = n end)
+ipc.neighbors({family = 6}, function(n) all_neigh_v6[#all_neigh_v6 + 1] = n end)
+
+-- Network sections (Configuration tab, only for enabled zones)
+for _, net in ipairs(nw:get_networks()) do
+    local net_name = net:name()
+    local zone = net_to_zone[net_name]
+    if zone and enabled_zones[zone] then
+		local iface = net:get_interface()
+		local name = iface and iface:name()
+		local MAX_RULES = 50
+		local rule_count = 0
+		uci_cursor:foreach("eqosplus", "network_"..net_name, function() rule_count = rule_count + 1 end)
+		local title = net_name:upper() .. " " .. translate("Configuration") ..
+			" (" .. rule_count .. "/" .. MAX_RULES .. ")"
+		t = a:section(TypedSection, "network_"..net_name, title)
 		t.template = "cbi/tblsection"
 		t.anonymous = true
 		t.addremove = true
+
+		-- Enforce per-network rule limit (tc class ID space is 100 per network)
+		local _orig_create = t.create
+		t.create = function(self, ...)
+			local count = 0
+			uci_cursor:foreach("eqosplus", "network_"..net_name, function() count = count + 1 end)
+			if count >= MAX_RULES then
+				return nil
+			end
+			return _orig_create(self, ...)
+		end
 
 		comment = t:option(Value, "comment", translate("Comment"))
 		comment.size = 8
@@ -81,49 +148,108 @@ for _, iface in ipairs(interfaces) do
 		e.size = 4
 
 		ip = t:option(Value, "mac", translate("IP/MAC"))
-		ipc.neighbors({family = 4, dev = name}, function(n)
-			if n.mac and n.dest then
-				local ip_str = n.dest:string()
-				local mac_str = n.mac
-				local hn = hostnames[mac_str:upper()] or hostnames[ip_str] or ""
-				local label = hn ~= ""
-					and string.format("%s (%s) - %s", ip_str, mac_str, hn)
-					or  string.format("%s (%s)", ip_str, mac_str)
-				ip:value(ip_str, label)
+		ip.datatype = "or(macaddr, ipaddr, ip6addr, cidr4, cidr6)"
+		if name then
+			-- Collect all device info, keyed by MAC (uppercase)
+			local devices = {}
+			local mac_order = {}
+
+			local function add_neighbor(family, n)
+				if not (n.mac and n.dest) then return end
+				local mk = tostring(n.mac):upper()
+				if not devices[mk] then
+					devices[mk] = { mac = tostring(n.mac), ipv4 = {}, ipv6 = {} }
+					mac_order[#mac_order + 1] = mk
+				end
+				local d = devices[mk]
+				local addr = n.dest:string()
+				local list = (family == 4) and d.ipv4 or d.ipv6
+				local dup = false
+				for _, v in ipairs(list) do if v == addr then dup = true; break end end
+				if not dup then list[#list + 1] = addr end
+				if not d.hostname or d.hostname == "" then
+					d.hostname = hostnames[mk] or hostnames[addr] or ""
+				end
 			end
-		end)
-		ipc.neighbors({family = 4, dev = name}, function(n)
-			if n.mac and n.dest then
-				local ip_str = n.dest:string()
-				local mac_str = n.mac
-				local hn = hostnames[mac_str:upper()] or hostnames[ip_str] or ""
-				local label = hn ~= ""
-					and string.format("%s (%s) - %s", mac_str, ip_str, hn)
-					or  string.format("%s (%s)", mac_str, ip_str)
-				ip:value(mac_str, label)
+
+			for _, n in ipairs(all_neigh_v4) do
+				if n.dev == name then add_neighbor(4, n) end
 			end
-		end)
+			for _, n in ipairs(all_neigh_v6) do
+				if n.dev == name then add_neighbor(6, n) end
+			end
+
+			-- Build label: value (other identifiers) - hostname
+			local function mklabel(val, d)
+				local ctx = {}
+				if val ~= d.mac then ctx[#ctx + 1] = d.mac end
+				local is_v4 = false
+				for _, v in ipairs(d.ipv4) do if v == val then is_v4 = true; break end end
+				if not is_v4 and #d.ipv4 > 0 then ctx[#ctx + 1] = d.ipv4[1] end
+				local is_v6 = false
+				for _, v in ipairs(d.ipv6) do if v == val then is_v6 = true; break end end
+				if not is_v6 and #d.ipv6 > 0 then ctx[#ctx + 1] = d.ipv6[1] end
+				local label = val
+				if #ctx > 0 then label = label .. " (" .. table.concat(ctx, " / ") .. ")" end
+				local hn = d.hostname or ""
+				if hn ~= "" then label = label .. " - " .. luci.util.pcdata(hn) end
+				return label
+			end
+
+			-- Group 1: IPv4 entries
+			for _, mk in ipairs(mac_order) do
+				for _, v4 in ipairs(devices[mk].ipv4) do
+					ip:value(v4, mklabel(v4, devices[mk]))
+				end
+			end
+			-- Group 2: IPv6 entries
+			for _, mk in ipairs(mac_order) do
+				for _, v6 in ipairs(devices[mk].ipv6) do
+					ip:value(v6, mklabel(v6, devices[mk]))
+				end
+			end
+			-- Group 3: MAC entries
+			for _, mk in ipairs(mac_order) do
+				ip:value(devices[mk].mac, mklabel(devices[mk].mac, devices[mk]))
+			end
+		end
 
 		e.size = 8
 		dl = t:option(Value, "download", translate("Downloads"))
 		dl.default = '0.1'
 		dl.size = 4
+		dl.datatype = "and(ufloat, max(1250))"
 
 		ul = t:option(Value, "upload", translate("Uploads"))
 		ul.default = '0.1'
 		ul.size = 4
+		ul.datatype = "and(ufloat, max(1250))"
+
+		-- Pure frontend toggle: derived from timestart/timeend, never saved to UCI.
+		-- Checked when both times are "00:00" (all-day). Backend only uses timestart/timeend.
+		e = t:option(Flag, "always", translate("All day"))
+		e.default = "1"
+		e.rmempty = false
+		e.size = 4
+		e.cfgvalue = function(self, section)
+			local ts = uci_cursor:get("eqosplus", section, "timestart") or "00:00"
+			local te = uci_cursor:get("eqosplus", section, "timeend") or "00:00"
+			return (ts == "00:00" and te == "00:00") and "1" or "0"
+		end
+		e.write = function() end
+		e.remove = function() end
 
 		e = t:option(Value, "timestart", translate("Start control time"))
 		e.placeholder = '00:00'
 		e.default = '00:00'
-		e.validate = validate_time
+		e.validate = validate_time_range
 		e.rmempty = true
 		e.size = 4
 
 		e = t:option(Value, "timeend", translate("Stop control time"))
 		e.placeholder = '00:00'
 		e.default = '00:00'
-		e.validate = validate_time
+		e.validate = validate_time_range
 		e.rmempty = true
 		e.size = 4
 
@@ -145,8 +271,15 @@ for _, iface in ipairs(interfaces) do
 end
 
 -- Debug section
-t = a:section(TypedSection, "eqosplus", translate("Debug"))
+t = a:section(TypedSection, "eqosplus")
 t.anonymous = true
+
+e = t:option(ListValue, "log_level", translate("Log Level"))
+e:value("0", translate("Off"))
+e:value("1", translate("Error"))
+e:value("2", translate("Info"))
+e:value("3", translate("Debug"))
+e.default = "2"
 
 e = t:option(DummyValue, "debug_panel")
 e.template = "eqosplus/debug"

@@ -56,35 +56,26 @@ msgstr "周期"
 msgid "Start and end time must differ (00:00 ~ 00:00 means all day)"
 msgstr "开始时间和结束时间不能相同（00:00 ~ 00:00 表示全天）"
 
-msgid "Everyday"
-msgstr "每天"
-
 msgid "Mon"
-msgstr "周一"
+msgstr "一"
 
 msgid "Tue"
-msgstr "周二"
+msgstr "二"
 
 msgid "Wed"
-msgstr "周三"
+msgstr "三"
 
 msgid "Thu"
-msgstr "周四"
+msgstr "四"
 
 msgid "Fri"
-msgstr "周五"
+msgstr "五"
 
 msgid "Sat"
-msgstr "周六"
+msgstr "六"
 
 msgid "Sun"
-msgstr "周日"
-
-msgid "Weekdays"
-msgstr "工作日"
-
-msgid "Weekend"
-msgstr "周末"
+msgstr "日"
 
 msgid "-- Please choose --"
 msgstr "-- 请选择 --"

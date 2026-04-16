@@ -620,6 +620,7 @@ case "$crrun" in
 		stop_qos
 		> "$IDLIST"
 		> "$NETWORKS"
+		> "$LOGFILE"
 	;;
 	"start")
 		rm -f /var/$NAME.tmpid.* 2>/dev/null

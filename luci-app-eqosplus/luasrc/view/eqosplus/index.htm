@@ -22,10 +22,12 @@
 [id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(8) { width: 15%; }  /* Comment */
 [id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(9),
 [id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(9) { width: 10%; }  /* Actions */
-/* All inputs/selects fill their cell */
+/* All inputs/selects fill their cell but never overflow it */
+[id^="cbi-eqosplus-network_"] .cbi-section-table td { overflow: hidden; }
 [id^="cbi-eqosplus-network_"] .cbi-section-table select,
 [id^="cbi-eqosplus-network_"] .cbi-section-table input[type="text"] {
-	width: 100%; box-sizing: border-box; overflow: hidden; text-overflow: ellipsis;
+	width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;
+	overflow: hidden; text-overflow: ellipsis;
 }
 .eqos-multiselect { position: relative; display: inline-block; min-width: 200px; }
 .eqos-multiselect-toggle {

@@ -228,20 +228,24 @@ for _, net in ipairs(nw:get_networks()) do
 		e.rmempty = true
 		e.size = 4
 
-		week=t:option(Value,"week",translate("Schedule"))
+		week=t:option(MultiValue,"week",translate("Schedule"))
+		week.delimiter = ","
+		week.default = "1,2,3,4,5,6,7"
 		week.rmempty = true
-		week:value('0',translate("Everyday"))
-		week:value(1,translate("Mon"))
-		week:value(2,translate("Tue"))
-		week:value(3,translate("Wed"))
-		week:value(4,translate("Thu"))
-		week:value(5,translate("Fri"))
-		week:value(6,translate("Sat"))
-		week:value(7,translate("Sun"))
-		week:value('1,2,3,4,5',translate("Weekdays"))
-		week:value('6,7',translate("Weekend"))
-		week.default='0'
-		week.size = 6
+		week:value('1',translate("Mon"))
+		week:value('2',translate("Tue"))
+		week:value('3',translate("Wed"))
+		week:value('4',translate("Thu"))
+		week:value('5',translate("Fri"))
+		week:value('6',translate("Sat"))
+		week:value('7',translate("Sun"))
+		-- Backward compat: legacy '0' (everyday) → all days selected;
+		-- empty also means everyday in backend (sched.sh treats empty week as always active)
+		week.cfgvalue = function(self, section)
+			local val = Value.cfgvalue(self, section) or ""
+			if val == "" or val == "0" then return "1,2,3,4,5,6,7" end
+			return val
+		end
 
 		comment = t:option(Value, "comment", translate("Comment"))
 		comment.size = 8
@@ -257,7 +261,7 @@ e:value("0", translate("Off"))
 e:value("1", translate("Error"))
 e:value("2", translate("Info"))
 e:value("3", translate("Debug"))
-e.default = "2"
+e.default = "1"
 
 e = t:option(DummyValue, "debug_panel")
 e.template = "eqosplus/debug"

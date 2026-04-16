@@ -22,11 +22,15 @@
 [id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(8) { width: 15%; }  /* Comment */
 [id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(9),
 [id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(9) { width: 10%; }  /* Actions */
-/* All inputs/selects fill their cell */
+/* All form elements fill their cell */
 [id^="cbi-eqosplus-network_"] .cbi-section-table select,
 [id^="cbi-eqosplus-network_"] .cbi-section-table input[type="text"] {
 	width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;
 	overflow: hidden; text-overflow: ellipsis;
+}
+/* LuCI custom dropdown widget (cbi-dropdown): constrain to cell width */
+[id^="cbi-eqosplus-network_"] .cbi-section-table .cbi-dropdown {
+	max-width: 100% !important; min-width: 0 !important; overflow: hidden;
 }
 /* Schedule dropdown multi-select (reuses eqos-multiselect styles) */
 [id^="cbi-eqosplus-network_"] .eqos-multiselect { min-width: 0; width: 100%; }
@@ -69,8 +73,7 @@
 
 	// --- Dynamic zone visibility + checkbox dropdown panel ---
 	// CBI form is rendered client-side by LuCI JS; checkboxes may not exist
-	// at DOMContentLoaded. Use MutationObserver to wait for them (same
-	// pattern as initAlwaysCheckboxes below).
+	// at DOMContentLoaded. Use MutationObserver to wait for them.
 	(function() {
 		var _done = false;
 		function initZoneDropdown() {
@@ -192,14 +195,27 @@
 			if (td.querySelector('.eqos-multiselect')) return; // already done
 			var cbs = td.querySelectorAll('input[type="checkbox"]');
 			if (!cbs.length) return;
+			// Collect checkbox spans before modifying DOM
+			var spans = td.querySelectorAll('.cbi-checkbox');
+			if (!spans.length) return;
+			// Hide all original td content (checkboxes, br tags, text nodes, etc.)
+			// to eliminate blank lines; keep nodes in DOM for form submission
+			var origChildren = [];
+			while (td.firstChild) origChildren.push(td.removeChild(td.firstChild));
+			var hidden = document.createElement('div');
+			hidden.style.display = 'none';
+			for (var i = 0; i < origChildren.length; i++) hidden.appendChild(origChildren[i]);
+			td.appendChild(hidden);
+			// Re-query checkboxes from hidden container
+			cbs = hidden.querySelectorAll('input[type="checkbox"]');
+			spans = hidden.querySelectorAll('.cbi-checkbox');
+			// Build dropdown widget
 			var wrapper = document.createElement('div');
 			wrapper.className = 'eqos-multiselect';
 			var toggle = document.createElement('div');
 			toggle.className = 'eqos-multiselect-toggle';
 			var dropdown = document.createElement('div');
 			dropdown.className = 'eqos-multiselect-dropdown';
-			// Move each checkbox+label into dropdown items
-			var spans = td.querySelectorAll('.cbi-checkbox');
 			for (var i = 0; i < spans.length; i++) {
 				var item = document.createElement('div');
 				item.className = 'eqos-multiselect-item';
@@ -212,7 +228,7 @@
 					if (cbs[i].checked) sel.push(dayLabels[cbs[i].value] || cbs[i].value);
 				}
 				toggle.textContent = sel.length === 7 ? '<%=translate("Mon")%>~<%=translate("Sun")%>' :
-					sel.length === 0 ? '<%=translate("Mon")%>~<%=translate("Sun")%>' :
+					sel.length === 0 ? '-- --' :
 					sel.join(' ');
 			}
 			for (var i = 0; i < cbs.length; i++) {

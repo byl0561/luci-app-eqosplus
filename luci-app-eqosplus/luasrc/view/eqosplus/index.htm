@@ -2,13 +2,30 @@
 <style>
 [id^="cbi-eqosplus-network_"] { display: none; }
 [id^="cbi-eqosplus-network_"].eqos-zone-visible { display: block !important; }
-/* IP/MAC dropdown: compact input, wide dropdown */
-[id^="cbi-eqosplus-network_"] select[name$=".mac"],
-[id^="cbi-eqosplus-network_"] input[name$=".mac"] {
-	max-width: 160px; width: 160px; overflow: hidden; text-overflow: ellipsis;
-}
-[id^="cbi-eqosplus-network_"] .cbi-input-select[name$=".mac"] option {
-	overflow: visible; white-space: nowrap;
+/* Fixed table layout: column widths based on data content, not header/dropdown text */
+[id^="cbi-eqosplus-network_"] .cbi-section-table { table-layout: fixed; width: 100%; }
+[id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(1),
+[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(1) { width: 5%; }   /* Enabled */
+[id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(2),
+[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(2) { width: 18%; }  /* IP/MAC */
+[id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(3),
+[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(3) { width: 10%; }  /* Download */
+[id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(4),
+[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(4) { width: 10%; }  /* Upload */
+[id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(5),
+[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(5) { width: 9%; }   /* Start */
+[id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(6),
+[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(6) { width: 9%; }   /* End */
+[id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(7),
+[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(7) { width: 14%; }  /* Schedule */
+[id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(8),
+[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(8) { width: 15%; }  /* Comment */
+[id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(9),
+[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(9) { width: 10%; }  /* Actions */
+/* All inputs/selects fill their cell */
+[id^="cbi-eqosplus-network_"] .cbi-section-table select,
+[id^="cbi-eqosplus-network_"] .cbi-section-table input[type="text"] {
+	width: 100%; box-sizing: border-box; overflow: hidden; text-overflow: ellipsis;
 }
 .eqos-multiselect { position: relative; display: inline-block; min-width: 200px; }
 .eqos-multiselect-toggle {

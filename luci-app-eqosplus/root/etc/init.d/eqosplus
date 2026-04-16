@@ -63,11 +63,13 @@ service_triggers() {
 }
 
 reload_service() {
-	# Delegate to start_service so procd's _procd_wrapper tracks instance
-	# changes. When service_enable='0', no instance is registered and procd
-	# kills the old daemon.  The previous implementation bypassed procd's
-	# instance lifecycle, leaving the daemon running after disable.
-	start_service "$@"
+	# Use procd's stop+start to ensure daemon lifecycle is managed correctly.
+	# stop kills the daemon and tears down tc; start rebuilds and relaunches
+	# (if enabled).  The brief lock gap between stop and start is benign:
+	# procd serializes service ops, and any hotplug resync in the gap just
+	# does redundant work that start immediately overwrites.
+	stop
+	start
 }
 
 stop_service(){

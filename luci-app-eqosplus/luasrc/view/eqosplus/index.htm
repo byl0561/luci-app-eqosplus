@@ -37,23 +37,21 @@
 [id^="cbi-eqosplus-network_"] .eqos-multiselect { min-width: 0; width: 100%; }
 [id^="cbi-eqosplus-network_"] .eqos-multiselect-toggle { font-size: 12px; padding: 2px 6px; }
 [id^="cbi-eqosplus-network_"] .eqos-multiselect-item label { cursor: pointer; }
-/* eqos-multiselect: styled to match LuCI native cbi-dropdown */
-.eqos-multiselect { position: relative; display: inline-block; min-width: 200px; }
+/* eqos-multiselect: extends native cbi-dropdown with open/close toggle */
+.eqos-multiselect { position: relative; display: inline-block; min-width: 200px; cursor: pointer; }
 .eqos-multiselect-toggle {
-	border: 1px solid #ccc; border-radius: 3px; padding: 3px 8px; cursor: pointer;
-	background: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-	line-height: 1.6; color: #444; font-size: inherit;
+	padding: 3px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.eqos-multiselect-toggle::after { content: " \25BE"; color: #888; }
+.eqos-multiselect-toggle::after { content: " \25BE"; opacity: 0.5; }
 .eqos-multiselect-dropdown {
-	display: none; position: absolute; z-index: 1000; left: 0; right: 0;
-	border: 1px solid #ccc; border-radius: 3px; background: #fff;
+	display: none; position: absolute; z-index: 1000; left: 0;
+	border: 1px solid #ccc; background: #fff;
 	box-shadow: 0 2px 6px rgba(0,0,0,0.2);
 	min-width: 100%; white-space: nowrap; margin-top: 1px;
 }
 .eqos-multiselect-item {
-	display: flex; align-items: center; gap: 4px;
-	padding: 4px 8px; cursor: pointer; font-size: inherit;
+	display: flex; align-items: center; gap: 6px;
+	padding: 5px 8px; cursor: pointer;
 }
 .eqos-multiselect-item:hover { background: #f0f6ff; }
 .eqos-multiselect-item input[type="checkbox"] { margin: 0; }
@@ -94,7 +92,7 @@
 			var container = cbs[0].closest('[data-idref]') || field;
 
 			var wrapper = document.createElement('div');
-			wrapper.className = 'eqos-multiselect';
+			wrapper.className = 'cbi-dropdown eqos-multiselect';
 			var toggle = document.createElement('div');
 			toggle.className = 'eqos-multiselect-toggle';
 			var dropdown = document.createElement('div');
@@ -218,7 +216,7 @@
 			spans = hidden.querySelectorAll('.cbi-checkbox');
 			// Build dropdown widget
 			var wrapper = document.createElement('div');
-			wrapper.className = 'eqos-multiselect';
+			wrapper.className = 'cbi-dropdown eqos-multiselect';
 			var toggle = document.createElement('div');
 			toggle.className = 'eqos-multiselect-toggle';
 			var dropdown = document.createElement('div');
@@ -257,6 +255,11 @@
 			wrapper.appendChild(toggle);
 			wrapper.appendChild(dropdown);
 			td.appendChild(wrapper);
+			// Legacy compat: if no checkbox is checked on initial render
+			// (week='0' or absent), auto-select all days
+			var anyChecked = false;
+			for (var i = 0; i < cbs.length; i++) { if (cbs[i].checked) { anyChecked = true; break; } }
+			if (!anyChecked) { for (var i = 0; i < cbs.length; i++) cbs[i].checked = true; }
 			updateText();
 		}
 		function initScheduleDropdowns() {

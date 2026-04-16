@@ -14,8 +14,8 @@
 	box-shadow: 0 2px 4px rgba(0,0,0,0.15);
 	min-width: 100%; white-space: nowrap;
 }
-.eqos-multiselect-dropdown label { display: block; padding: 4px 8px; margin: 0; cursor: pointer; }
-.eqos-multiselect-dropdown label:hover { background: #f0f0f0; }
+.eqos-multiselect-item { display: block; padding: 4px 8px; cursor: pointer; }
+.eqos-multiselect-item:hover { background: #f0f0f0; }
 .eqos-multiselect.open .eqos-multiselect-dropdown { display: block; }
 </style>
 <script type="text/javascript">//<![CDATA[
@@ -38,13 +38,21 @@
 	%>;
 
 	// --- Dynamic zone visibility + checkbox dropdown panel ---
+	// CBI form is rendered client-side by LuCI JS; checkboxes may not exist
+	// at DOMContentLoaded. Use MutationObserver to wait for them (same
+	// pattern as initAlwaysCheckboxes below).
 	(function() {
+		var _done = false;
 		function initZoneDropdown() {
+			if (_done) return;
 			var cbs = document.querySelectorAll('input[type="checkbox"][name$=".enabled_zones"]');
 			if (!cbs.length) return;
+			_done = true;
 
-			// --- Build dropdown panel from CBI checkboxes ---
-			var field = cbs[0].parentNode.closest('.cbi-value-field') || cbs[0].parentNode;
+			// --- Build dropdown panel ---
+			var field = cbs[0].closest('.cbi-value-field') || cbs[0].parentNode;
+			var container = cbs[0].closest('[data-idref]') || field;
+
 			var wrapper = document.createElement('div');
 			wrapper.className = 'eqos-multiselect';
 			var toggle = document.createElement('div');
@@ -52,47 +60,45 @@
 			var dropdown = document.createElement('div');
 			dropdown.className = 'eqos-multiselect-dropdown';
 
-			// Wrap each checkbox + its label text into a new <label>, move to dropdown.
-			// CBI renders <input> + <label for="id"> as siblings (not nested),
-			// so we must pair them explicitly.
-			for (var i = 0; i < cbs.length; i++) {
-				var cb = cbs[i];
-				var lbl = document.createElement('label');
-				var forLabel = cb.id ? field.querySelector('label[for="' + cb.id + '"]') : null;
-				var text = forLabel ? forLabel.textContent : cb.value;
-				if (forLabel) forLabel.parentNode.removeChild(forLabel);
-				lbl.appendChild(cb);
-				lbl.appendChild(document.createTextNode(' ' + text.trim()));
-				dropdown.appendChild(lbl);
-			}
-			var brs = field.querySelectorAll('br');
-			for (var i = brs.length - 1; i >= 0; i--) {
-				brs[i].parentNode.removeChild(brs[i]);
+			// Move entire span.cbi-checkbox elements into dropdown
+			// DOM: <span class="cbi-checkbox"><input><label><span>text</span></span>
+			var cbSpans = container.querySelectorAll('.cbi-checkbox');
+			for (var i = 0; i < cbSpans.length; i++) {
+				var item = document.createElement('div');
+				item.className = 'eqos-multiselect-item';
+				item.appendChild(cbSpans[i]);
+				dropdown.appendChild(item);
 			}
 
 			wrapper.appendChild(toggle);
 			wrapper.appendChild(dropdown);
-			field.appendChild(wrapper);
+			container.appendChild(wrapper);
 
 			// Toggle open/close
 			toggle.addEventListener('click', function() {
 				wrapper.classList.toggle('open');
 			});
-			// Close on outside click
 			document.addEventListener('click', function(ev) {
 				if (!wrapper.contains(ev.target)) {
 					wrapper.classList.remove('open');
 				}
 			});
 
+			// --- Helper: get display text for a checkbox ---
+			function getCheckboxText(cb) {
+				var parent = cb.closest('.cbi-checkbox');
+				if (parent) {
+					var s = parent.querySelector('span');
+					if (s) return s.textContent.trim();
+				}
+				return cb.value;
+			}
+
 			// --- Zone visibility sync ---
 			function updateToggleText() {
 				var names = [];
 				for (var i = 0; i < cbs.length; i++) {
-					if (cbs[i].checked) {
-						var lbl = cbs[i].parentNode;
-						names.push(lbl ? lbl.textContent.trim() : cbs[i].value);
-					}
+					if (cbs[i].checked) names.push(getCheckboxText(cbs[i]));
 				}
 				toggle.textContent = names.length ? names.join(', ') : '<%=translate("-- Please choose --")%>';
 			}
@@ -126,10 +132,22 @@
 			updateToggleText();
 			syncVisibility();
 		}
-		if (document.readyState === 'loading') {
-			document.addEventListener('DOMContentLoaded', initZoneDropdown);
-		} else {
-			initZoneDropdown();
+
+		// Try immediately, then watch for CBI to render the checkboxes
+		initZoneDropdown();
+		if (!_done) {
+			var map = document.querySelector('.cbi-map');
+			if (map) {
+				var _timer = null;
+				var _obs = new MutationObserver(function() {
+					if (_timer) clearTimeout(_timer);
+					_timer = setTimeout(function() {
+						initZoneDropdown();
+						if (_done) _obs.disconnect();
+					}, 100);
+				});
+				_obs.observe(map, { childList: true, subtree: true });
+			}
 		}
 	})();
 	// --- Tab setup ---

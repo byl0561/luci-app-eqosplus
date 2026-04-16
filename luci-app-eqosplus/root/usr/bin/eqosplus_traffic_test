@@ -89,20 +89,32 @@ assert "upload traffic hits rate-limited class" check_ul_counter
 
 echo ""
 echo "-- Rate limit verification --"
-echo "Sending flood ping @ 100kbit limit (~12.5KB/s), expect overlimits"
+echo "Sending flood ping @ 100kbit limit, expect overlimits increase"
 
-# Use ping flood to send enough data to trigger rate limiting
-# 200 x 1400 bytes = 280KB, well above 100kbit capacity
+# Record overlimits BEFORE flood (both directions)
+DL_OL_BEFORE=$(tc -s class show dev $VETH_HOST classid 1:1100 2>/dev/null | sed -n 's/.* overlimits \([0-9]*\) .*/\1/p' | head -1)
+UL_OL_BEFORE=$(tc -s class show dev $VETH_IFB classid 1:1100 2>/dev/null | sed -n 's/.* overlimits \([0-9]*\) .*/\1/p' | head -1)
+DL_OL_BEFORE=${DL_OL_BEFORE:-0}
+UL_OL_BEFORE=${UL_OL_BEFORE:-0}
+
+# Flood ping: 200 x 1400 bytes should exceed 100kbit rate
 ip netns exec $TEST_NS ping -f -c 200 -s 1400 -W 5 $HOST_IP >/dev/null 2>&1
 
-# Check upload (IFB) overlimits — flood sends requests (upload direction),
-# which are rate-limited on IFB. Download overlimits stay 0 because reply
-# rate is throttled by the upload rate limit.
-UL_OVERLIMITS=$(tc -s class show dev $VETH_IFB classid 1:1100 2>/dev/null | sed -n 's/.* overlimits \([0-9]*\) .*/\1/p' | head -1)
-UL_OVERLIMITS=${UL_OVERLIMITS:-0}
+# Record overlimits AFTER flood
+DL_OL_AFTER=$(tc -s class show dev $VETH_HOST classid 1:1100 2>/dev/null | sed -n 's/.* overlimits \([0-9]*\) .*/\1/p' | head -1)
+UL_OL_AFTER=$(tc -s class show dev $VETH_IFB classid 1:1100 2>/dev/null | sed -n 's/.* overlimits \([0-9]*\) .*/\1/p' | head -1)
+DL_OL_AFTER=${DL_OL_AFTER:-0}
+UL_OL_AFTER=${UL_OL_AFTER:-0}
 
-check_overlimits() { [ "$UL_OVERLIMITS" -gt 0 ]; }
-assert "rate limiting active (overlimits > 0: $UL_OVERLIMITS)" check_overlimits
+DL_OL_DELTA=$((DL_OL_AFTER - DL_OL_BEFORE))
+UL_OL_DELTA=$((UL_OL_AFTER - UL_OL_BEFORE))
+echo "Overlimits delta: download=$DL_OL_DELTA upload=$UL_OL_DELTA"
+
+# Upload (IFB) must show overlimits: flood requests arrive at wire speed,
+# far exceeding 100kbit class rate. Download may not show overlimits because
+# reply rate is already paced by the upload rate limiter.
+check_overlimits() { [ "$UL_OL_DELTA" -gt 0 ]; }
+assert "rate limiting active (upload overlimits delta: $UL_OL_DELTA)" check_overlimits
 
 echo ""
 echo "-- IP-based rule traffic --"

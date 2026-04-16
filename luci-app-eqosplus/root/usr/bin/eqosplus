@@ -367,6 +367,7 @@ EOF
 	done <<EOF
 $need_stop
 EOF
+	:  # ensure return 0 — empty need_stop leaves while exit status = 1
 }
 
 stop_qos() {
@@ -618,13 +619,8 @@ case "$crrun" in
 	;;
 	"start")
 		rm -f /var/$NAME.tmpid.* 2>/dev/null
-		# Rotate log on start: keep last 10KB for debugging restart issues
-		if [ -f "$LOGFILE" ]; then
-			_sz=$(stat -c %s "$LOGFILE" 2>/dev/null || wc -c < "$LOGFILE" 2>/dev/null) || _sz=0
-			if [ "$_sz" -gt 10240 ]; then
-				tail -c 10240 "$LOGFILE" > "${LOGFILE}.tmp" && mv "${LOGFILE}.tmp" "$LOGFILE" || rm -f "${LOGFILE}.tmp"
-			fi
-		fi
+		# Clear log on start — config may have changed (e.g. log level)
+		> "$LOGFILE"
 		log_msg 2 "=== eqosplus starting ==="
 		cleanup_orphaned_rules
 		_uci_cache=""  # invalidate after cleanup may have modified UCI

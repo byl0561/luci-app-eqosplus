@@ -89,30 +89,26 @@ assert "upload traffic hits rate-limited class" check_ul_counter
 
 echo ""
 echo "-- Rate limit verification --"
-echo "Sending flood ping @ 100kbit limit, expect overlimits increase"
 
-# Record overlimits BEFORE flood (both directions)
-DL_OL_BEFORE=$(tc -s class show dev $VETH_HOST classid 1:1100 2>/dev/null | sed -n 's/.* overlimits \([0-9]*\) .*/\1/p' | head -1)
+# Lower rate to 8kbit (~1KB/s) so regular pings (1442 bytes/sec ≈ 11.5kbit)
+# exceed the limit. Avoids ping -f which may not be available on BusyBox.
+eqos_del_id "$VETH_HOST" "1100"
+eqos_add_mac "$VETH_HOST" "1100" "$CLIENT_MAC" "8" "8"
+echo "Rate: 8kbit (~1KB/s), regular ping at ~11.5kbit should trigger overlimits"
+
+# Record overlimits BEFORE
 UL_OL_BEFORE=$(tc -s class show dev $VETH_IFB classid 1:1100 2>/dev/null | sed -n 's/.* overlimits \([0-9]*\) .*/\1/p' | head -1)
-DL_OL_BEFORE=${DL_OL_BEFORE:-0}
 UL_OL_BEFORE=${UL_OL_BEFORE:-0}
 
-# Flood ping: 200 x 1400 bytes should exceed 100kbit rate
-ip netns exec $TEST_NS ping -f -c 200 -s 1400 -W 5 $HOST_IP >/dev/null 2>&1
+ip netns exec $TEST_NS ping -c 10 -s 1400 -W 2 $HOST_IP >/dev/null 2>&1
 
-# Record overlimits AFTER flood
-DL_OL_AFTER=$(tc -s class show dev $VETH_HOST classid 1:1100 2>/dev/null | sed -n 's/.* overlimits \([0-9]*\) .*/\1/p' | head -1)
+# Record overlimits AFTER
 UL_OL_AFTER=$(tc -s class show dev $VETH_IFB classid 1:1100 2>/dev/null | sed -n 's/.* overlimits \([0-9]*\) .*/\1/p' | head -1)
-DL_OL_AFTER=${DL_OL_AFTER:-0}
 UL_OL_AFTER=${UL_OL_AFTER:-0}
 
-DL_OL_DELTA=$((DL_OL_AFTER - DL_OL_BEFORE))
 UL_OL_DELTA=$((UL_OL_AFTER - UL_OL_BEFORE))
-echo "Overlimits delta: download=$DL_OL_DELTA upload=$UL_OL_DELTA"
+echo "Upload overlimits delta: $UL_OL_DELTA"
 
-# Upload (IFB) must show overlimits: flood requests arrive at wire speed,
-# far exceeding 100kbit class rate. Download may not show overlimits because
-# reply rate is already paced by the upload rate limiter.
 check_overlimits() { [ "$UL_OL_DELTA" -gt 0 ]; }
 assert "rate limiting active (upload overlimits delta: $UL_OL_DELTA)" check_overlimits
 

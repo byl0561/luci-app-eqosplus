@@ -95,12 +95,14 @@ echo "Sending flood ping @ 100kbit limit (~12.5KB/s), expect overlimits"
 # 200 x 1400 bytes = 280KB, well above 100kbit capacity
 ip netns exec $TEST_NS ping -f -c 200 -s 1400 -W 5 $HOST_IP >/dev/null 2>&1
 
-# Check that overlimits counter > 0 (proves rate limiting happened)
-DL_OVERLIMITS=$(tc -s class show dev $VETH_HOST classid 1:1100 2>/dev/null | sed -n 's/.* overlimits \([0-9]*\) .*/\1/p' | head -1)
-DL_OVERLIMITS=${DL_OVERLIMITS:-0}
+# Check upload (IFB) overlimits — flood sends requests (upload direction),
+# which are rate-limited on IFB. Download overlimits stay 0 because reply
+# rate is throttled by the upload rate limit.
+UL_OVERLIMITS=$(tc -s class show dev $VETH_IFB classid 1:1100 2>/dev/null | sed -n 's/.* overlimits \([0-9]*\) .*/\1/p' | head -1)
+UL_OVERLIMITS=${UL_OVERLIMITS:-0}
 
-check_overlimits() { [ "$DL_OVERLIMITS" -gt 0 ]; }
-assert "rate limiting active (overlimits > 0: $DL_OVERLIMITS)" check_overlimits
+check_overlimits() { [ "$UL_OVERLIMITS" -gt 0 ]; }
+assert "rate limiting active (overlimits > 0: $UL_OVERLIMITS)" check_overlimits
 
 echo ""
 echo "-- IP-based rule traffic --"
@@ -114,7 +116,7 @@ IP_DL_BEFORE=$(tc -s class show dev $VETH_HOST classid 1:1102 2>/dev/null | sed 
 IP_DL_BEFORE=${IP_DL_BEFORE:-0}
 
 # Send traffic from client
-ip netns exec $TEST_NS ping -c 10 -s 1400 -i 0.1 -W 2 $HOST_IP >/dev/null 2>&1
+ip netns exec $TEST_NS ping -c 10 -s 1400 -W 2 $HOST_IP >/dev/null 2>&1
 
 # Check counters increased
 IP_DL_AFTER=$(tc -s class show dev $VETH_HOST classid 1:1102 2>/dev/null | sed -n 's/.* Sent \([0-9]*\) .*/\1/p' | head -1)

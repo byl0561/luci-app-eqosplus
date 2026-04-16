@@ -52,13 +52,21 @@
 			var dropdown = document.createElement('div');
 			dropdown.className = 'eqos-multiselect-dropdown';
 
-			// Move checkbox labels into dropdown, remove <br> tags
-			var labels = field.querySelectorAll('label');
-			for (var i = 0; i < labels.length; i++) {
-				dropdown.appendChild(labels[i]);
+			// Wrap each checkbox + its label text into a new <label>, move to dropdown.
+			// CBI renders <input> + <label for="id"> as siblings (not nested),
+			// so we must pair them explicitly.
+			for (var i = 0; i < cbs.length; i++) {
+				var cb = cbs[i];
+				var lbl = document.createElement('label');
+				var forLabel = cb.id ? field.querySelector('label[for="' + cb.id + '"]') : null;
+				var text = forLabel ? forLabel.textContent : cb.value;
+				if (forLabel) forLabel.parentNode.removeChild(forLabel);
+				lbl.appendChild(cb);
+				lbl.appendChild(document.createTextNode(' ' + text.trim()));
+				dropdown.appendChild(lbl);
 			}
 			var brs = field.querySelectorAll('br');
-			for (var i = 0; i < brs.length; i++) {
+			for (var i = brs.length - 1; i >= 0; i--) {
 				brs[i].parentNode.removeChild(brs[i]);
 			}
 

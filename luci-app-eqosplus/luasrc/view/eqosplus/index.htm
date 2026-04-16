@@ -22,13 +22,16 @@
 [id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(8) { width: 15%; }  /* Comment */
 [id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(9),
 [id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(9) { width: 10%; }  /* Actions */
-/* All inputs/selects fill their cell but never overflow it */
-[id^="cbi-eqosplus-network_"] .cbi-section-table td { overflow: hidden; }
+/* All inputs/selects fill their cell */
 [id^="cbi-eqosplus-network_"] .cbi-section-table select,
 [id^="cbi-eqosplus-network_"] .cbi-section-table input[type="text"] {
 	width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;
 	overflow: hidden; text-overflow: ellipsis;
 }
+/* Schedule dropdown multi-select (reuses eqos-multiselect styles) */
+[id^="cbi-eqosplus-network_"] .eqos-multiselect { min-width: 0; width: 100%; }
+[id^="cbi-eqosplus-network_"] .eqos-multiselect-toggle { font-size: 12px; padding: 2px 6px; }
+[id^="cbi-eqosplus-network_"] .eqos-multiselect-item label { cursor: pointer; }
 .eqos-multiselect { position: relative; display: inline-block; min-width: 200px; }
 .eqos-multiselect-toggle {
 	border: 1px solid #ccc; padding: 4px 8px; cursor: pointer;
@@ -176,6 +179,73 @@
 				_obs.observe(map, { childList: true, subtree: true });
 			}
 		}
+	})();
+	// --- Schedule multi-select dropdown (per table row) ---
+	// Transforms inline MultiValue checkboxes into compact dropdown widgets
+	// (same eqos-multiselect pattern as the zone selector).
+	(function() {
+		var dayLabels = {
+			'1':'<%=translate("Mon")%>','2':'<%=translate("Tue")%>','3':'<%=translate("Wed")%>',
+			'4':'<%=translate("Thu")%>','5':'<%=translate("Fri")%>','6':'<%=translate("Sat")%>','7':'<%=translate("Sun")%>'
+		};
+		function buildDropdown(td) {
+			if (td.querySelector('.eqos-multiselect')) return; // already done
+			var cbs = td.querySelectorAll('input[type="checkbox"]');
+			if (!cbs.length) return;
+			var wrapper = document.createElement('div');
+			wrapper.className = 'eqos-multiselect';
+			var toggle = document.createElement('div');
+			toggle.className = 'eqos-multiselect-toggle';
+			var dropdown = document.createElement('div');
+			dropdown.className = 'eqos-multiselect-dropdown';
+			// Move each checkbox+label into dropdown items
+			var spans = td.querySelectorAll('.cbi-checkbox');
+			for (var i = 0; i < spans.length; i++) {
+				var item = document.createElement('div');
+				item.className = 'eqos-multiselect-item';
+				item.appendChild(spans[i]);
+				dropdown.appendChild(item);
+			}
+			function updateText() {
+				var sel = [];
+				for (var i = 0; i < cbs.length; i++) {
+					if (cbs[i].checked) sel.push(dayLabels[cbs[i].value] || cbs[i].value);
+				}
+				toggle.textContent = sel.length === 7 ? '<%=translate("Mon")%>~<%=translate("Sun")%>' :
+					sel.length === 0 ? '<%=translate("Mon")%>~<%=translate("Sun")%>' :
+					sel.join(' ');
+			}
+			for (var i = 0; i < cbs.length; i++) {
+				cbs[i].addEventListener('change', updateText);
+			}
+			toggle.addEventListener('click', function() { wrapper.classList.toggle('open'); });
+			wrapper.appendChild(toggle);
+			wrapper.appendChild(dropdown);
+			td.appendChild(wrapper);
+			updateText();
+		}
+		function initScheduleDropdowns() {
+			// Schedule is column 7 (nth-child(7)) in network tables
+			var tds = document.querySelectorAll('[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(7)');
+			for (var i = 0; i < tds.length; i++) buildDropdown(tds[i]);
+		}
+		initScheduleDropdowns();
+		var map = document.querySelector('.cbi-map');
+		if (map) {
+			var _timer = null;
+			var _obs = new MutationObserver(function() {
+				if (_timer) clearTimeout(_timer);
+				_timer = setTimeout(initScheduleDropdowns, 150);
+			});
+			_obs.observe(map, { childList: true, subtree: true });
+		}
+		// Close any open schedule dropdown when clicking outside
+		document.addEventListener('click', function(ev) {
+			var drops = document.querySelectorAll('[id^="cbi-eqosplus-network_"] .eqos-multiselect.open');
+			for (var i = 0; i < drops.length; i++) {
+				if (!drops[i].contains(ev.target)) drops[i].classList.remove('open');
+			}
+		});
 	})();
 	// --- Tab setup ---
 	(function() {

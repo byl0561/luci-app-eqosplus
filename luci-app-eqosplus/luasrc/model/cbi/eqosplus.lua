@@ -242,7 +242,7 @@ for _, net in ipairs(nw:get_networks()) do
 		-- Backward compat: legacy '0' (everyday) → all days selected;
 		-- empty also means everyday in backend (sched.sh treats empty week as always active)
 		week.cfgvalue = function(self, section)
-			local val = Value.cfgvalue(self, section) or ""
+			local val = self.map:get(section, self.option) or ""
 			if val == "" or val == "0" then return "1,2,3,4,5,6,7" end
 			return val
 		end

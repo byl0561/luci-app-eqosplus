@@ -9,5 +9,13 @@ EOF
 
 [ -s /etc/config/eqosplus ] || echo "config eqosplus" > /etc/config/eqosplus
 
+# Migrate legacy week='0' (everyday) to explicit day list for MultiValue widget
+_migrated=false
+for _sect in $(uci show eqosplus 2>/dev/null | grep "\.week='0'" | sed "s/\.week=.*//"); do
+	uci set "${_sect}.week=1,2,3,4,5,6,7"
+	_migrated=true
+done
+$_migrated && uci commit eqosplus
+
 rm -f /tmp/luci-indexcache
 exit 0

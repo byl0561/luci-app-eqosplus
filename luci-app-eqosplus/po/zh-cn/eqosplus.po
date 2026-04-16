@@ -56,6 +56,9 @@ msgstr "周期"
 msgid "Start and end time must differ (00:00 ~ 00:00 means all day)"
 msgstr "开始时间和结束时间不能相同（00:00 ~ 00:00 表示全天）"
 
+msgid "Download and upload cannot both be 0"
+msgstr "下载和上传速度不能同时为 0"
+
 msgid "Mon"
 msgstr "一"
 

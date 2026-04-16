@@ -137,6 +137,7 @@ for _, net in ipairs(nw:get_networks()) do
 		e.size = 4
 
 		ip = t:option(Value, "mac", translate("IP/MAC"))
+		ip.rmempty = false
 		ip.datatype = "or(macaddr, ipaddr, ip6addr, cidr4, cidr6)"
 		if name then
 			-- Collect all device info, keyed by MAC (uppercase)
@@ -203,16 +204,24 @@ for _, net in ipairs(nw:get_networks()) do
 			end
 		end
 
-		e.size = 8
 		dl = t:option(Value, "download", translate("Download"))
 		dl.default = '0.1'
 		dl.size = 4
 		dl.datatype = "and(ufloat, max(1250))"
+		dl.rmempty = false
+		dl.validate = function(self, value, section)
+			local peer = luci.http.formvalue("cbid.eqosplus." .. section .. ".upload") or "0"
+			if tonumber(value) == 0 and tonumber(peer) == 0 then
+				return nil, translate("Download and upload cannot both be 0")
+			end
+			return value
+		end
 
 		ul = t:option(Value, "upload", translate("Upload"))
 		ul.default = '0.1'
 		ul.size = 4
 		ul.datatype = "and(ufloat, max(1250))"
+		ul.rmempty = false
 
 		e = t:option(Value, "timestart", translate("Start"))
 		e.placeholder = '00:00'
@@ -231,7 +240,7 @@ for _, net in ipairs(nw:get_networks()) do
 		week=t:option(MultiValue,"week",translate("Schedule"))
 		week.delimiter = ","
 		week.default = "1,2,3,4,5,6,7"
-		week.rmempty = true
+		week.rmempty = false
 		week:value('1',translate("Mon"))
 		week:value('2',translate("Tue"))
 		week:value('3',translate("Wed"))
@@ -239,14 +248,6 @@ for _, net in ipairs(nw:get_networks()) do
 		week:value('5',translate("Fri"))
 		week:value('6',translate("Sat"))
 		week:value('7',translate("Sun"))
-		-- Backward compat: legacy '0' (everyday) → all days selected;
-		-- empty also means everyday in backend (sched.sh treats empty week as always active)
-		week.cfgvalue = function(self, section)
-			local val = uci_cursor:get("eqosplus", section, "week") or ""
-			if val == "" or val == "0" then return "1,2,3,4,5,6,7" end
-			return val
-		end
-
 		comment = t:option(Value, "comment", translate("Comment"))
 		comment.size = 8
     end

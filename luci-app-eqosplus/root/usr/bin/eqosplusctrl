@@ -50,6 +50,10 @@ rebuild_cache() {
 }
 
 idlistusr(){
+	# Skip if no active networks (service stopped or disabled — eqosplus stop
+	# empties this file).  Prevents futile add/del attempts on torn-down tc.
+	[ -s "/var/$NAME.networks" ] || return
+
 	[ -s "$IDLIST" ] || touch "$IDLIST"
 
 	# Reload cache if config file changed (stat for mtime; md5sum fallback

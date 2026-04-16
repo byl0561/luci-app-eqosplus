@@ -60,7 +60,7 @@ function validate_time_range(self, value, section)
 		or uci_cursor:get("eqosplus", section, peer_field)
 		or "00:00"
 	if value == peer and value ~= "00:00" then
-		return nil, translate("Start time and end time must differ (use All day for 24h)")
+		return nil, translate("Start and end time must differ (00:00 ~ 00:00 means all day)")
 	end
 	return value
 end
@@ -131,9 +131,6 @@ for _, net in ipairs(nw:get_networks()) do
 			end
 			return _orig_create(self, ...)
 		end
-
-		comment = t:option(Value, "comment", translate("Comment"))
-		comment.size = 8
 
 		e = t:option(Flag, "enable", translate("Enabled"))
 		e.rmempty = false
@@ -207,58 +204,47 @@ for _, net in ipairs(nw:get_networks()) do
 		end
 
 		e.size = 8
-		dl = t:option(Value, "download", translate("Downloads"))
+		dl = t:option(Value, "download", translate("Download"))
 		dl.default = '0.1'
 		dl.size = 4
 		dl.datatype = "and(ufloat, max(1250))"
 
-		ul = t:option(Value, "upload", translate("Uploads"))
+		ul = t:option(Value, "upload", translate("Upload"))
 		ul.default = '0.1'
 		ul.size = 4
 		ul.datatype = "and(ufloat, max(1250))"
 
-		-- Pure frontend toggle: derived from timestart/timeend, never saved to UCI.
-		-- Checked when both times are "00:00" (all-day). Backend only uses timestart/timeend.
-		e = t:option(Flag, "always", translate("All day"))
-		e.default = "1"
-		e.rmempty = false
-		e.size = 4
-		e.cfgvalue = function(self, section)
-			local ts = uci_cursor:get("eqosplus", section, "timestart") or "00:00"
-			local te = uci_cursor:get("eqosplus", section, "timeend") or "00:00"
-			return (ts == "00:00" and te == "00:00") and "1" or "0"
-		end
-		e.write = function() end
-		e.remove = function() end
-
-		e = t:option(Value, "timestart", translate("Start control time"))
+		e = t:option(Value, "timestart", translate("Start"))
 		e.placeholder = '00:00'
 		e.default = '00:00'
 		e.validate = validate_time_range
 		e.rmempty = true
 		e.size = 4
 
-		e = t:option(Value, "timeend", translate("Stop control time"))
+		e = t:option(Value, "timeend", translate("End"))
 		e.placeholder = '00:00'
 		e.default = '00:00'
 		e.validate = validate_time_range
 		e.rmempty = true
 		e.size = 4
 
-		week=t:option(Value,"week",translate("Week Day(1~7)"))
+		week=t:option(Value,"week",translate("Schedule"))
 		week.rmempty = true
 		week:value('0',translate("Everyday"))
-		week:value(1,translate("Monday"))
-		week:value(2,translate("Tuesday"))
-		week:value(3,translate("Wednesday"))
-		week:value(4,translate("Thursday"))
-		week:value(5,translate("Friday"))
-		week:value(6,translate("Saturday"))
-		week:value(7,translate("Sunday"))
-		week:value('1,2,3,4,5',translate("Workday"))
-		week:value('6,7',translate("Rest Day"))
+		week:value(1,translate("Mon"))
+		week:value(2,translate("Tue"))
+		week:value(3,translate("Wed"))
+		week:value(4,translate("Thu"))
+		week:value(5,translate("Fri"))
+		week:value(6,translate("Sat"))
+		week:value(7,translate("Sun"))
+		week:value('1,2,3,4,5',translate("Weekdays"))
+		week:value('6,7',translate("Weekend"))
 		week.default='0'
 		week.size = 6
+
+		comment = t:option(Value, "comment", translate("Comment"))
+		comment.size = 8
     end
 end
 

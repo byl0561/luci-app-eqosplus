@@ -5,8 +5,14 @@ msgstr "定时限速"
 msgid "Network speed limit"
 msgstr "定时网速限制"
 
-msgid "Running state"
-msgstr "运行状态"
+msgid "Status"
+msgstr "状态"
+
+msgid "Enabled"
+msgstr "启用"
+
+msgid "Collecting data..."
+msgstr "正在获取数据..."
 
 msgid "Not running"
 msgstr "未运行"
@@ -15,46 +21,76 @@ msgid "Running"
 msgstr "已运行"
 
 msgid "Users can limit the network speed for uploading/downloading through MAC, IP. The speed unit is MB/second."
-msgstr "可以通过MAC，IP限制用户上传/下载的网速。速度单位为<font color=\"red\"><b> MB/秒 </b></font>。"
+msgstr "可以通过 MAC、IP 限制用户上传/下载的网速。速度单位为 MB/秒。"
 
-msgid "MAC/IP"
-msgstr "MAC/IP"
+msgid "Visible Networks"
+msgstr "管理的网络"
 
-msgid "Downloads"
-msgstr "下载速度"
+msgid "Same-zone bypass"
+msgstr "同区域免限速"
 
-msgid "Uploads"
-msgstr "上传速度"
+msgid "Skip rate limiting for traffic between devices in the same firewall zone (e.g. LAN-to-LAN)"
+msgstr "同一防火墙区域内的设备互访不受限速影响（如 LAN 内部通信）"
+
+msgid "IP/MAC"
+msgstr "IP/MAC"
+
+msgid "Download"
+msgstr "下载"
+
+msgid "Upload"
+msgstr "上传"
 
 msgid "Comment"
 msgstr "备注"
 
-msgid "Upload bandwidth(Mbit/s)"
-msgstr "上传总带宽(Mbit/s)"
+msgid "Start"
+msgstr "开始时间"
 
-msgid "Download bandwidth(Mbit/s)"
-msgstr "下载总带宽(Mbit/s)"
+msgid "End"
+msgstr "结束时间"
 
-msgid "Start control time"
-msgstr "起控时间"
+msgid "Schedule"
+msgstr "周期"
 
-msgid "Stop control time"
-msgstr "停控时间"
+msgid "Start and end time must differ (00:00 ~ 00:00 means all day)"
+msgstr "开始时间和结束时间不能相同（00:00 ~ 00:00 表示全天）"
 
-msgid "Week Day(1~7)"
-msgstr "星期(1~7)"
+msgid "Everyday"
+msgstr "每天"
 
-msgid "Suggested feedback:"
-msgstr "建议反馈:"
+msgid "Mon"
+msgstr "周一"
 
-msgid "Rest Day"
-msgstr "休息日"
+msgid "Tue"
+msgstr "周二"
 
-msgid "Workday"
+msgid "Wed"
+msgstr "周三"
+
+msgid "Thu"
+msgstr "周四"
+
+msgid "Fri"
+msgstr "周五"
+
+msgid "Sat"
+msgstr "周六"
+
+msgid "Sun"
+msgstr "周日"
+
+msgid "Weekdays"
 msgstr "工作日"
 
-msgid "Automatic settings"
-msgstr "自动设置"
+msgid "Weekend"
+msgstr "周末"
+
+msgid "-- Please choose --"
+msgstr "-- 请选择 --"
+
+msgid "Configuration"
+msgstr "配置"
 
 msgid "Log Level"
 msgstr "日志级别"
@@ -122,15 +158,5 @@ msgstr "已运行"
 msgid "NOT RUNNING"
 msgstr "未运行"
 
-msgid "Configuration"
-msgstr "配置"
-
 msgid "turboacc flow offloading conflict, please disable sw_flow/sfe_flow"
-msgstr "turboacc 流量卸载冲突，请先关闭 sw_flow/sfe_flow"
-
-msgid "All day"
-msgstr "全天"
-
-msgid "Start time and end time must differ (use All day for 24h)"
-msgstr "起控时间和停控时间不能相同（全天限速请勾选"全天"）"
-
+msgstr "与 TurboACC 流量卸载冲突，请先关闭 sw_flow/sfe_flow"

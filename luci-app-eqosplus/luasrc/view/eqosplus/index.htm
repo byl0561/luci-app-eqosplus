@@ -2,6 +2,14 @@
 <style>
 [id^="cbi-eqosplus-network_"] { display: none; }
 [id^="cbi-eqosplus-network_"].eqos-zone-visible { display: block !important; }
+/* IP/MAC dropdown: compact input, wide dropdown */
+[id^="cbi-eqosplus-network_"] select[name$=".mac"],
+[id^="cbi-eqosplus-network_"] input[name$=".mac"] {
+	max-width: 160px; width: 160px; overflow: hidden; text-overflow: ellipsis;
+}
+[id^="cbi-eqosplus-network_"] .cbi-input-select[name$=".mac"] option {
+	overflow: visible; white-space: nowrap;
+}
 .eqos-multiselect { position: relative; display: inline-block; min-width: 200px; }
 .eqos-multiselect-toggle {
 	border: 1px solid #ccc; padding: 4px 8px; cursor: pointer;
@@ -239,61 +247,6 @@
 
 		document.getElementById('eqos-tab-config').onclick = function() { switchTab('config'); stopLogPoll(); };
 		document.getElementById('eqos-tab-debug').onclick = function() { switchTab('debug'); startLogPoll(); };
-	})();
-
-	// --- "All day" checkbox: lock timestart/timeend to 00:00 when checked ---
-	// Pure frontend: "always" is derived from timestart/timeend, not saved to UCI.
-	// Uses readonly (not disabled) so values still submit with the form.
-	(function() {
-		function findRow(el) {
-			return el.closest('tr') || el.closest('.cbi-section-table-row') || el.closest('.tr');
-		}
-		function toggleTimeFields(cb) {
-			var row = findRow(cb);
-			if (!row) return;
-			// Match by name or id — covers all LuCI CBI rendering variants
-			var inputs = row.querySelectorAll(
-				'input[name$=".timestart"], input[name$=".timeend"], ' +
-				'input[id$=".timestart"], input[id$=".timeend"]'
-			);
-			for (var i = 0; i < inputs.length; i++) {
-				inputs[i].readOnly = cb.checked;
-				if (cb.checked) {
-					inputs[i].value = '00:00';
-					inputs[i].style.opacity = '0.5';
-				} else {
-					inputs[i].style.opacity = '';
-				}
-			}
-		}
-		function initAlwaysCheckboxes() {
-			var cbs = document.querySelectorAll(
-				'input[type="checkbox"][name$=".always"], ' +
-				'input[type="checkbox"][id$=".always"], ' +
-				'input[type="checkbox"][id*=".always"]'
-			);
-			for (var i = 0; i < cbs.length; i++) {
-				toggleTimeFields(cbs[i]);
-				if (!cbs[i].getAttribute('data-eqos-bound')) {
-					cbs[i].setAttribute('data-eqos-bound', '1');
-					(function(cb) {
-						cb.addEventListener('change', function() { toggleTimeFields(cb); });
-					})(cbs[i]);
-				}
-			}
-		}
-		if (document.readyState === 'loading') {
-			document.addEventListener('DOMContentLoaded', initAlwaysCheckboxes);
-		} else {
-			initAlwaysCheckboxes();
-		}
-		var _debounceTimer = null;
-		var observer = new MutationObserver(function() {
-			if (_debounceTimer) clearTimeout(_debounceTimer);
-			_debounceTimer = setTimeout(initAlwaysCheckboxes, 100);
-		});
-		var map = document.querySelector('.cbi-map');
-		if (map) observer.observe(map, { childList: true, subtree: true });
 	})();
 
 	// --- Status polling ---

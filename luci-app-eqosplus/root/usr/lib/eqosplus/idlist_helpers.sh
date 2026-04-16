@@ -16,7 +16,7 @@ _file_remove_exact_line() {
 	local tmpf
 	tmpf=$($EQOS_MKTEMP) || return 1
 	grep -vFx "$pattern" "$file" > "$tmpf" 2>/dev/null
-	case $? in 0|1) mv "$tmpf" "$file" || { rm -f "$tmpf"; $EQOS_LOG 1 "mv failed updating $file"; return 1; } ;; *) rm -f "$tmpf"; $EQOS_LOG 1 "grep failed updating $file" ;; esac
+	case $? in 0|1) mv "$tmpf" "$file" || { rm -f "$tmpf"; $EQOS_LOG 1 "mv failed updating $file"; return 1; } ;; *) rm -f "$tmpf"; $EQOS_LOG 1 "grep failed updating $file"; return 1 ;; esac
 }
 
 # Remove all IDLIST entries for a given network (safe fixed-string prefix match)
@@ -28,7 +28,7 @@ _idlist_remove_network() {
 	local tmpf
 	tmpf=$($EQOS_MKTEMP) || return 1
 	awk -v prefix="${net}[" 'substr($0, 1, length(prefix)) != prefix' "$IDLIST" > "$tmpf" 2>/dev/null
-	case $? in 0|1) mv "$tmpf" "$IDLIST" || { rm -f "$tmpf"; $EQOS_LOG 1 "mv failed updating $IDLIST"; return 1; } ;; *) rm -f "$tmpf"; $EQOS_LOG 1 "awk failed updating $IDLIST" ;; esac
+	case $? in 0|1) mv "$tmpf" "$IDLIST" || { rm -f "$tmpf"; $EQOS_LOG 1 "mv failed updating $IDLIST"; return 1; } ;; *) rm -f "$tmpf"; $EQOS_LOG 1 "awk failed updating $IDLIST"; return 1 ;; esac
 }
 
 # Get the stored device for a rule ID from IDLIST
@@ -46,7 +46,7 @@ _idlist_remove_entry() {
 	local tmpf
 	tmpf=$($EQOS_MKTEMP) || return 1
 	awk -v prefix="${id}:" 'substr($0, 1, length(prefix)) != prefix' "$IDLIST" > "$tmpf" 2>/dev/null
-	case $? in 0|1) mv "$tmpf" "$IDLIST" || { rm -f "$tmpf"; $EQOS_LOG 1 "mv failed updating $IDLIST"; return 1; } ;; *) rm -f "$tmpf"; $EQOS_LOG 1 "awk failed updating $IDLIST" ;; esac
+	case $? in 0|1) mv "$tmpf" "$IDLIST" || { rm -f "$tmpf"; $EQOS_LOG 1 "mv failed updating $IDLIST"; return 1; } ;; *) rm -f "$tmpf"; $EQOS_LOG 1 "awk failed updating $IDLIST"; return 1 ;; esac
 }
 
 # Add an entry to IDLIST with device info (replaces any existing entry for same ID)

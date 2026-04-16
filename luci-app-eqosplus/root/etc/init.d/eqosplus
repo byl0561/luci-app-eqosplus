@@ -63,13 +63,11 @@ service_triggers() {
 }
 
 reload_service() {
-	exec 200>"$LOCKFILE"
-	trap 'exec 200>&-' INT TERM HUP
-	_flock_wait 200 15 || { exec 200>&-; trap - INT TERM HUP; logger -t eqosplus "reload_service: could not acquire lock"; return 1; }
-	_eqosplus_stop
-	_eqosplus_start
-	exec 200>&-
-	trap - INT TERM HUP
+	# Delegate to start_service so procd's _procd_wrapper tracks instance
+	# changes. When service_enable='0', no instance is registered and procd
+	# kills the old daemon.  The previous implementation bypassed procd's
+	# instance lifecycle, leaving the daemon running after disable.
+	start_service "$@"
 }
 
 stop_service(){

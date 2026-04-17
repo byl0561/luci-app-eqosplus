@@ -35,12 +35,12 @@
 [id^="cbi-eqosplus-network_"] .cbi-section-table .cbi-dropdown {
 	max-width: 100% !important; min-width: 0 !important;
 }
-/* Schedule dropdown multi-select (reuses eqos-multiselect styles) */
-[id^="cbi-eqosplus-network_"] .eqos-multiselect { min-width: 0; width: 100%; }
+/* In table context: allow shrinking below cbi-dropdown min-width */
+[id^="cbi-eqosplus-network_"] .eqos-multiselect { min-width: 0; }
 [id^="cbi-eqosplus-network_"] .eqos-multiselect-item label { cursor: pointer; }
-/* eqos-multiselect: extends native cbi-dropdown with open/close toggle */
-.eqos-multiselect { position: relative; display: inline-block; width: 100%; cursor: pointer; }
-.cbi-dropdown.eqos-multiselect { display: block !important; width: 100%; box-sizing: border-box; }
+/* eqos-multiselect: extends native cbi-dropdown with open/close toggle.
+   Always used with .cbi-dropdown class (see JS wrapper.className). */
+.eqos-multiselect { position: relative; display: block !important; width: 100%; box-sizing: border-box; cursor: pointer; }
 .eqos-multiselect-toggle {
 	display: block; width: 100%; box-sizing: border-box;
 	padding: 5px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -80,26 +80,13 @@
 	// Log poll controls — assigned inside tab IIFE, used by visibilitychange handler
 	var startLogPoll, stopLogPoll;
 
-	// Capture schedule checkbox states at script start, before any IIFE
-	// or LuCI deferred init can modify DOM / clear .checked properties.
-	var _weekStates = {};
-	(function() {
-		var tds = document.querySelectorAll('[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(7)');
-		for (var t = 0; t < tds.length; t++) {
-			var cbs = tds[t].querySelectorAll('input[type="checkbox"]');
-			for (var i = 0; i < cbs.length; i++) {
-				if (cbs[i].name && cbs[i].checked) {
-					if (!_weekStates[cbs[i].name]) _weekStates[cbs[i].name] = {};
-					_weekStates[cbs[i].name][cbs[i].value] = true;
-				}
-			}
-		}
-	})();
-
-	// --- Zone -> network mapping (from firewall config) ---
-	var eqosZoneMap = <%
+	// --- Server-side data injection (immune to JS timing issues) ---
+	<%
 		local json = require("luci.jsonc")
 		local uci_t = require("luci.model.uci").cursor()
+	%>
+	// Zone -> network mapping (from firewall config)
+	var eqosZoneMap = <%
 		local zmap = {}
 		uci_t:foreach("firewall", "zone", function(z)
 			if z.name and z.name ~= "wan" then
@@ -109,6 +96,21 @@
 			end
 		end)
 		write(json.stringify(zmap))
+	%>;
+	// UCI week values per section (keyed by section name, e.g. "cfg012345")
+	// Used to restore schedule checkbox states reliably, bypassing DOM timing.
+	var _uciWeekData = <%
+		local wdata = {}
+		uci_t:foreach("eqosplus", nil, function(s)
+			if s[".type"] and s[".type"]:match("^network_") then
+				local w = s.week
+				if not w or w == "" or w == "0" then
+					w = "1,2,3,4,5,6,7"
+				end
+				wdata[s[".name"]] = w
+			end
+		end)
+		write(json.stringify(wdata))
 	%>;
 
 	// --- Dynamic zone visibility + checkbox dropdown panel ---
@@ -243,19 +245,11 @@
 			if (td.querySelector('.eqos-multiselect')) return; // already done
 			var cbs = td.querySelectorAll('input[type="checkbox"]');
 			if (!cbs.length) return;
-			// Collect checkbox spans before modifying DOM
 			var spans = td.querySelectorAll('.cbi-checkbox');
 			if (!spans.length) return;
-			// Capture checkbox states NOW (before DOM manipulation),
-			// as a primary source; _weekStates (early capture) is fallback.
-			var directStates = {};
-			var hasDirectState = false;
-			for (var i = 0; i < cbs.length; i++) {
-				directStates[cbs[i].value] = cbs[i].checked;
-				if (cbs[i].checked) hasDirectState = true;
-			}
-			// Hide all original td content (checkboxes, br tags, text nodes, etc.)
-			// to eliminate blank lines; keep nodes in DOM for form submission
+			// Hide all original td content (checkboxes, br tags, text nodes,
+			// and any LuCI cbi-dropdown widget) to eliminate blank lines;
+			// keep nodes in DOM for form submission.
 			var origChildren = [];
 			while (td.firstChild) origChildren.push(td.removeChild(td.firstChild));
 			var hidden = document.createElement('div');
@@ -284,7 +278,6 @@
 					if (cbs[i].checked) days.push(parseInt(cbs[i].value));
 				}
 				if (days.length === 0) { toggle.textContent = '<%=translate("-- Please choose --")%>'; return; }
-				// Build ranges for consecutive days: [1,2,3,5] → "Mon~Wed Fri"
 				days.sort(function(a,b){return a-b});
 				var ranges = [], s = days[0], e = days[0];
 				for (var i = 1; i < days.length; i++) {
@@ -306,21 +299,21 @@
 			wrapper.appendChild(toggle);
 			wrapper.appendChild(dropdown);
 			td.appendChild(wrapper);
-			// Restore checkbox states: prefer direct DOM capture (taken before
-			// DOM manipulation above), fall back to early _weekStates capture,
-			// then default all-checked for truly new rows only.
+			// Restore checkbox states from server-injected UCI data (immune to
+			// LuCI Dropdown JS timing that can clear/reset .checked properties).
+			// Extract section name from checkbox name: "cbid.eqosplus.<section>.week"
 			var cbName = cbs.length > 0 ? cbs[0].name : '';
-			var saved = _weekStates[cbName];
-			if (hasDirectState) {
+			var section = cbName.replace(/^cbid\.eqosplus\./, '').replace(/\.week$/, '');
+			var uciWeek = _uciWeekData[section];
+			if (uciWeek) {
+				var vals = uciWeek.split(',');
+				var valSet = {};
+				for (var v = 0; v < vals.length; v++) valSet[vals[v]] = true;
 				for (var i = 0; i < cbs.length; i++) {
-					cbs[i].checked = !!directStates[cbs[i].value];
-				}
-			} else if (saved) {
-				for (var i = 0; i < cbs.length; i++) {
-					cbs[i].checked = !!saved[cbs[i].value];
+					cbs[i].checked = !!valSet[cbs[i].value];
 				}
 			} else {
-				// No captured state: new row, auto-select all days
+				// New row (no UCI data yet): auto-select all days
 				for (var i = 0; i < cbs.length; i++) cbs[i].checked = true;
 			}
 			updateText();

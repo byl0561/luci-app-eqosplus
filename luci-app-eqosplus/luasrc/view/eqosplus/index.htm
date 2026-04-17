@@ -36,17 +36,21 @@
 }
 /* Schedule dropdown multi-select (reuses eqos-multiselect styles) */
 [id^="cbi-eqosplus-network_"] .eqos-multiselect { min-width: 0; width: 100%; }
-
 [id^="cbi-eqosplus-network_"] .eqos-multiselect-item label { cursor: pointer; }
 /* eqos-multiselect: extends native cbi-dropdown with open/close toggle */
-.eqos-multiselect { position: relative; display: inline-block; min-width: 200px; cursor: pointer; }
+.eqos-multiselect { position: relative; display: inline-block; min-width: 200px; width: 100%; cursor: pointer; }
 .eqos-multiselect-toggle {
-	padding: 3px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-	border: 1px solid #ccc; background: #fff;
+	padding: 5px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+	border: 1px solid; line-height: 1.4;
+}
+/* In table context, cbi-dropdown wrapper already provides border;
+   override toggle border to avoid double border, restore table sizing */
+[id^="cbi-eqosplus-network_"] .eqos-multiselect-toggle {
+	font-size: 12px; padding: 4px 6px; border: none; background: transparent;
 }
 .eqos-multiselect-toggle::after { content: " \25BE"; opacity: 0.5; }
 .eqos-multiselect-dropdown {
-	display: none; position: absolute; z-index: 1000; left: 0;
+	display: none; position: absolute; z-index: 1000; left: 0; top: 100%;
 	border: 1px solid #ccc; background: #fff;
 	box-shadow: 0 2px 6px rgba(0,0,0,0.2);
 	min-width: 100%; white-space: nowrap; margin-top: 1px;
@@ -62,6 +66,22 @@
 <script type="text/javascript">//<![CDATA[
 	// Log poll controls — assigned inside tab IIFE, used by visibilitychange handler
 	var startLogPoll, stopLogPoll;
+
+	// Capture schedule checkbox states at script start, before any IIFE
+	// or LuCI deferred init can modify DOM / clear .checked properties.
+	var _weekStates = {};
+	(function() {
+		var tds = document.querySelectorAll('[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(7)');
+		for (var t = 0; t < tds.length; t++) {
+			var cbs = tds[t].querySelectorAll('input[type="checkbox"]');
+			for (var i = 0; i < cbs.length; i++) {
+				if (cbs[i].name && cbs[i].checked) {
+					if (!_weekStates[cbs[i].name]) _weekStates[cbs[i].name] = {};
+					_weekStates[cbs[i].name][cbs[i].value] = true;
+				}
+			}
+		}
+	})();
 
 	// --- Zone -> network mapping (from firewall config) ---
 	var eqosZoneMap = <%
@@ -257,28 +277,34 @@
 			wrapper.appendChild(toggle);
 			wrapper.appendChild(dropdown);
 			td.appendChild(wrapper);
-			// Restore server-side checked state: the HTML 'checked' attribute
-			// survives LuCI dropdown init that may clear the .checked property.
-			// Only auto-select all for genuinely new rows (no server attributes).
-			var anyServerChecked = false;
-			for (var i = 0; i < cbs.length; i++) {
-				if (cbs[i].hasAttribute('checked')) {
-					cbs[i].checked = true;
-					anyServerChecked = true;
+			// Restore checkbox states captured at script start (before any
+			// LuCI dropdown init could clear .checked properties).
+			var cbName = cbs.length > 0 ? cbs[0].name : '';
+			var saved = _weekStates[cbName];
+			if (saved) {
+				for (var i = 0; i < cbs.length; i++) {
+					cbs[i].checked = !!saved[cbs[i].value];
 				}
-			}
-			if (!anyServerChecked) {
+			} else {
+				// No captured state: new row, auto-select all days
 				for (var i = 0; i < cbs.length; i++) cbs[i].checked = true;
 			}
 			updateText();
 		}
 		function fixPlaceholders() {
-			var tds = document.querySelectorAll(
-				'[id^="cbi-eqosplus-network_"] .cbi-section-table .placeholder td'
+			var tables = document.querySelectorAll(
+				'[id^="cbi-eqosplus-network_"] .cbi-section-table'
 			);
-			for (var i = 0; i < tds.length; i++) {
-				if (!tds[i].hasAttribute('colspan')) {
-					tds[i].setAttribute('colspan', '9');
+			for (var i = 0; i < tables.length; i++) {
+				var placeholder = tables[i].querySelector('.placeholder');
+				if (placeholder) {
+					// Switch to auto layout so colspan can span full width
+					tables[i].style.tableLayout = 'auto';
+					var td = placeholder.querySelector('td');
+					if (td) td.setAttribute('colspan', '9');
+				} else {
+					// Data rows exist; clear override so CSS fixed layout applies
+					tables[i].style.tableLayout = '';
 				}
 			}
 		}

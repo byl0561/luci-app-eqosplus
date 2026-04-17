@@ -90,27 +90,39 @@ assert "upload traffic hits rate-limited class" check_ul_counter
 echo ""
 echo "-- Rate limit verification --"
 
-# Lower rate to 8kbit (~1KB/s) so regular pings (1442 bytes/sec ≈ 11.5kbit)
-# exceed the limit. Avoids ping -f which may not be available on BusyBox.
-eqos_del_id "$VETH_HOST" "1100"
-eqos_add_mac "$VETH_HOST" "1100" "$CLIENT_MAC" "8" "8"
-echo "Rate: 8kbit (~1KB/s), regular ping at ~11.5kbit should trigger overlimits"
-
-# Record overlimits BEFORE
+# Baseline: 100kbit limit vs ~11.5kbit ping traffic — should NOT trigger overlimits
+echo "Baseline: 100kbit limit, ~11.5kbit ping should NOT trigger overlimits"
 UL_OL_BEFORE=$(tc -s class show dev $VETH_IFB classid 1:1100 2>/dev/null | sed -n 's/.* overlimits \([0-9]*\) .*/\1/p' | head -1)
 UL_OL_BEFORE=${UL_OL_BEFORE:-0}
 
 ip netns exec $TEST_NS ping -c 10 -s 1400 -W 2 $HOST_IP >/dev/null 2>&1
 
-# Record overlimits AFTER
 UL_OL_AFTER=$(tc -s class show dev $VETH_IFB classid 1:1100 2>/dev/null | sed -n 's/.* overlimits \([0-9]*\) .*/\1/p' | head -1)
 UL_OL_AFTER=${UL_OL_AFTER:-0}
+BASELINE_OL=$((UL_OL_AFTER - UL_OL_BEFORE))
+echo "Baseline overlimits delta: $BASELINE_OL"
 
-UL_OL_DELTA=$((UL_OL_AFTER - UL_OL_BEFORE))
-echo "Upload overlimits delta: $UL_OL_DELTA"
+check_baseline() { [ "$BASELINE_OL" -eq 0 ]; }
+assert "baseline: no overlimits when traffic is below limit" check_baseline
 
-check_overlimits() { [ "$UL_OL_DELTA" -gt 0 ]; }
-assert "rate limiting active (upload overlimits delta: $UL_OL_DELTA)" check_overlimits
+# Lower rate to 8kbit (~1KB/s) so the same ping traffic (~11.5kbit) exceeds
+# the limit and triggers overlimits. Contrast with baseline proves rate limiting works.
+eqos_del_id "$VETH_HOST" "1100"
+eqos_add_mac "$VETH_HOST" "1100" "$CLIENT_MAC" "8" "8"
+echo "Rate: 8kbit (~1KB/s), same ping at ~11.5kbit should trigger overlimits"
+
+UL_OL_BEFORE=$(tc -s class show dev $VETH_IFB classid 1:1100 2>/dev/null | sed -n 's/.* overlimits \([0-9]*\) .*/\1/p' | head -1)
+UL_OL_BEFORE=${UL_OL_BEFORE:-0}
+
+ip netns exec $TEST_NS ping -c 10 -s 1400 -W 2 $HOST_IP >/dev/null 2>&1
+
+UL_OL_AFTER=$(tc -s class show dev $VETH_IFB classid 1:1100 2>/dev/null | sed -n 's/.* overlimits \([0-9]*\) .*/\1/p' | head -1)
+UL_OL_AFTER=${UL_OL_AFTER:-0}
+LIMITED_OL=$((UL_OL_AFTER - UL_OL_BEFORE))
+echo "Limited overlimits delta: $LIMITED_OL"
+
+check_overlimits() { [ "$LIMITED_OL" -gt 0 ]; }
+assert "rate limiting active (overlimits: baseline=$BASELINE_OL vs limited=$LIMITED_OL)" check_overlimits
 
 echo ""
 echo "-- IP-based rule traffic --"

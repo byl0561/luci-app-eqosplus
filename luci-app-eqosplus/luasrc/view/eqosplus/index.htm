@@ -4,6 +4,7 @@
 [id^="cbi-eqosplus-network_"].eqos-zone-visible { display: block !important; }
 /* Fixed table layout: column widths based on data content, not header/dropdown text */
 [id^="cbi-eqosplus-network_"] .cbi-section-table { table-layout: fixed; width: 100%; }
+[id^="cbi-eqosplus-network_"] .cbi-section-table .placeholder td { text-align: center; }
 [id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(1),
 [id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(1) { width: 5%; }   /* Enabled */
 [id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(2),
@@ -35,12 +36,13 @@
 }
 /* Schedule dropdown multi-select (reuses eqos-multiselect styles) */
 [id^="cbi-eqosplus-network_"] .eqos-multiselect { min-width: 0; width: 100%; }
-[id^="cbi-eqosplus-network_"] .eqos-multiselect-toggle { font-size: 12px; padding: 2px 6px; }
+
 [id^="cbi-eqosplus-network_"] .eqos-multiselect-item label { cursor: pointer; }
 /* eqos-multiselect: extends native cbi-dropdown with open/close toggle */
 .eqos-multiselect { position: relative; display: inline-block; min-width: 200px; cursor: pointer; }
 .eqos-multiselect-toggle {
 	padding: 3px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+	border: 1px solid #ccc; background: #fff;
 }
 .eqos-multiselect-toggle::after { content: " \25BE"; opacity: 0.5; }
 .eqos-multiselect-dropdown {
@@ -255,14 +257,33 @@
 			wrapper.appendChild(toggle);
 			wrapper.appendChild(dropdown);
 			td.appendChild(wrapper);
-			// Legacy compat: if no checkbox is checked on initial render
-			// (week='0' or absent), auto-select all days
-			var anyChecked = false;
-			for (var i = 0; i < cbs.length; i++) { if (cbs[i].checked) { anyChecked = true; break; } }
-			if (!anyChecked) { for (var i = 0; i < cbs.length; i++) cbs[i].checked = true; }
+			// Restore server-side checked state: the HTML 'checked' attribute
+			// survives LuCI dropdown init that may clear the .checked property.
+			// Only auto-select all for genuinely new rows (no server attributes).
+			var anyServerChecked = false;
+			for (var i = 0; i < cbs.length; i++) {
+				if (cbs[i].hasAttribute('checked')) {
+					cbs[i].checked = true;
+					anyServerChecked = true;
+				}
+			}
+			if (!anyServerChecked) {
+				for (var i = 0; i < cbs.length; i++) cbs[i].checked = true;
+			}
 			updateText();
 		}
+		function fixPlaceholders() {
+			var tds = document.querySelectorAll(
+				'[id^="cbi-eqosplus-network_"] .cbi-section-table .placeholder td'
+			);
+			for (var i = 0; i < tds.length; i++) {
+				if (!tds[i].hasAttribute('colspan')) {
+					tds[i].setAttribute('colspan', '9');
+				}
+			}
+		}
 		function initScheduleDropdowns() {
+			fixPlaceholders();
 			// Schedule is column 7 (nth-child(7)) in network tables
 			var tds = document.querySelectorAll('[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(7)');
 			for (var i = 0; i < tds.length; i++) buildDropdown(tds[i]);

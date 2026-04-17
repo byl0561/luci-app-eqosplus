@@ -126,6 +126,15 @@
 			var field = cbs[0].closest('.cbi-value-field') || cbs[0].parentNode;
 			var container = cbs[0].closest('[data-idref]') || field;
 
+			// Hide all original content (checkboxes, br, text nodes) to prevent
+			// blank space above the dropdown; keep in DOM for form submission
+			var origChildren = [];
+			while (container.firstChild) origChildren.push(container.removeChild(container.firstChild));
+			var hidden = document.createElement('div');
+			hidden.style.display = 'none';
+			for (var i = 0; i < origChildren.length; i++) hidden.appendChild(origChildren[i]);
+			container.appendChild(hidden);
+
 			var wrapper = document.createElement('div');
 			wrapper.className = 'cbi-dropdown eqos-multiselect';
 			var toggle = document.createElement('div');
@@ -133,9 +142,8 @@
 			var dropdown = document.createElement('div');
 			dropdown.className = 'eqos-multiselect-dropdown';
 
-			// Move entire span.cbi-checkbox elements into dropdown
-			// DOM: <span class="cbi-checkbox"><input><label><span>text</span></span>
-			var cbSpans = container.querySelectorAll('.cbi-checkbox');
+			// Move .cbi-checkbox spans from hidden container into dropdown items
+			var cbSpans = hidden.querySelectorAll('.cbi-checkbox');
 			for (var i = 0; i < cbSpans.length; i++) {
 				var item = document.createElement('div');
 				item.className = 'eqos-multiselect-item';
@@ -238,6 +246,14 @@
 			// Collect checkbox spans before modifying DOM
 			var spans = td.querySelectorAll('.cbi-checkbox');
 			if (!spans.length) return;
+			// Capture checkbox states NOW (before DOM manipulation),
+			// as a primary source; _weekStates (early capture) is fallback.
+			var directStates = {};
+			var hasDirectState = false;
+			for (var i = 0; i < cbs.length; i++) {
+				directStates[cbs[i].value] = cbs[i].checked;
+				if (cbs[i].checked) hasDirectState = true;
+			}
 			// Hide all original td content (checkboxes, br tags, text nodes, etc.)
 			// to eliminate blank lines; keep nodes in DOM for form submission
 			var origChildren = [];
@@ -290,11 +306,16 @@
 			wrapper.appendChild(toggle);
 			wrapper.appendChild(dropdown);
 			td.appendChild(wrapper);
-			// Restore checkbox states captured at script start (before any
-			// LuCI dropdown init could clear .checked properties).
+			// Restore checkbox states: prefer direct DOM capture (taken before
+			// DOM manipulation above), fall back to early _weekStates capture,
+			// then default all-checked for truly new rows only.
 			var cbName = cbs.length > 0 ? cbs[0].name : '';
 			var saved = _weekStates[cbName];
-			if (saved) {
+			if (hasDirectState) {
+				for (var i = 0; i < cbs.length; i++) {
+					cbs[i].checked = !!directStates[cbs[i].value];
+				}
+			} else if (saved) {
 				for (var i = 0; i < cbs.length; i++) {
 					cbs[i].checked = !!saved[cbs[i].value];
 				}

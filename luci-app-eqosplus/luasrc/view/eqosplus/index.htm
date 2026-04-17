@@ -4,7 +4,8 @@
 [id^="cbi-eqosplus-network_"].eqos-zone-visible { display: block !important; }
 /* Fixed table layout: column widths based on data content, not header/dropdown text */
 [id^="cbi-eqosplus-network_"] .cbi-section-table { table-layout: fixed; width: 100%; }
-[id^="cbi-eqosplus-network_"] .cbi-section-table .placeholder td { text-align: center; }
+[id^="cbi-eqosplus-network_"] .cbi-section-table .placeholder td,
+[id^="cbi-eqosplus-network_"] .cbi-section-table .tr.placeholder .td { text-align: center; width: auto !important; }
 [id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(1),
 [id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(1) { width: 5%; }   /* Enabled */
 [id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(2),
@@ -38,30 +39,42 @@
 [id^="cbi-eqosplus-network_"] .eqos-multiselect { min-width: 0; width: 100%; }
 [id^="cbi-eqosplus-network_"] .eqos-multiselect-item label { cursor: pointer; }
 /* eqos-multiselect: extends native cbi-dropdown with open/close toggle */
-.eqos-multiselect { position: relative; display: inline-block; min-width: 200px; width: 100%; cursor: pointer; }
+.eqos-multiselect { position: relative; display: inline-block; width: 100%; cursor: pointer; }
+.cbi-dropdown.eqos-multiselect { display: block !important; width: 100%; box-sizing: border-box; }
 .eqos-multiselect-toggle {
+	display: block; width: 100%; box-sizing: border-box;
 	padding: 5px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-	border: 1px solid; line-height: 1.4;
+	border: none; background: transparent; line-height: 1.4;
 }
-/* In table context, cbi-dropdown wrapper already provides border;
-   override toggle border to avoid double border, restore table sizing */
+/* In table context: restore table sizing */
 [id^="cbi-eqosplus-network_"] .eqos-multiselect-toggle {
-	font-size: 12px; padding: 4px 6px; border: none; background: transparent;
+	font-size: 12px; padding: 4px 6px;
 }
 .eqos-multiselect-toggle::after { content: " \25BE"; opacity: 0.5; }
+/* Dropdown panel: reuse native cbi-dropdown[open] > ul.dropdown styling */
 .eqos-multiselect-dropdown {
-	display: none; position: absolute; z-index: 1000; left: 0; top: 100%;
-	border: 1px solid #ccc; background: #fff;
-	box-shadow: 0 2px 6px rgba(0,0,0,0.2);
-	min-width: 100%; white-space: nowrap; margin-top: 1px;
+	display: none; position: absolute; z-index: 1100; left: 0; top: 100%;
+	background: var(--background-color-low); border: 1px solid #918e8c;
+	box-shadow: 0 0 4px #918e8c;
+	min-width: 100%; white-space: nowrap;
 }
 .eqos-multiselect-item {
 	display: flex; align-items: center; gap: 6px;
 	padding: 5px 8px; cursor: pointer;
 }
-.eqos-multiselect-item:hover { background: #f0f6ff; }
+/* Item states: match native cbi-dropdown li states */
+.eqos-multiselect-item:hover {
+	background: var(--primary-color-low); color: var(--on-primary-color);
+}
+.eqos-multiselect-item:has(input:checked) {
+	background: var(--primary-color-medium); color: var(--on-primary-color);
+}
+.eqos-multiselect-item:has(input:checked):hover {
+	background: linear-gradient(90deg, var(--primary-color-medium) 50%, var(--primary-color-low));
+}
 .eqos-multiselect-item input[type="checkbox"] { margin: 0; }
-.eqos-multiselect.open .eqos-multiselect-dropdown { display: block; }
+/* Use [open] attribute to match native cbi-dropdown focus/glow */
+.eqos-multiselect[open] .eqos-multiselect-dropdown { display: block; }
 </style>
 <script type="text/javascript">//<![CDATA[
 	// Log poll controls — assigned inside tab IIFE, used by visibilitychange handler
@@ -134,13 +147,13 @@
 			wrapper.appendChild(dropdown);
 			container.appendChild(wrapper);
 
-			// Toggle open/close
+			// Toggle open/close (use [open] attribute for native cbi-dropdown glow)
 			toggle.addEventListener('click', function() {
-				wrapper.classList.toggle('open');
+				wrapper.toggleAttribute('open');
 			});
 			document.addEventListener('click', function(ev) {
 				if (!wrapper.contains(ev.target)) {
-					wrapper.classList.remove('open');
+					wrapper.removeAttribute('open');
 				}
 			});
 
@@ -273,7 +286,7 @@
 			for (var i = 0; i < cbs.length; i++) {
 				cbs[i].addEventListener('change', updateText);
 			}
-			toggle.addEventListener('click', function() { wrapper.classList.toggle('open'); });
+			toggle.addEventListener('click', function() { wrapper.toggleAttribute('open'); });
 			wrapper.appendChild(toggle);
 			wrapper.appendChild(dropdown);
 			td.appendChild(wrapper);
@@ -296,11 +309,16 @@
 				'[id^="cbi-eqosplus-network_"] .cbi-section-table'
 			);
 			for (var i = 0; i < tables.length; i++) {
-				var placeholder = tables[i].querySelector('.placeholder');
-				if (placeholder) {
+				// Detect placeholder via class or via <em> inside a single-cell row
+				var placeholder = tables[i].querySelector('.placeholder')
+					|| tables[i].querySelector('tr > td[colspan] > em, .tr > .td > em');
+				var placeholderRow = placeholder
+					? (placeholder.closest('.placeholder') || placeholder.closest('tr, .tr'))
+					: null;
+				if (placeholderRow) {
 					// Switch to auto layout so colspan can span full width
 					tables[i].style.tableLayout = 'auto';
-					var td = placeholder.querySelector('td');
+					var td = placeholderRow.querySelector('td, .td');
 					if (td) td.setAttribute('colspan', '9');
 				} else {
 					// Data rows exist; clear override so CSS fixed layout applies
@@ -315,6 +333,10 @@
 			for (var i = 0; i < tds.length; i++) buildDropdown(tds[i]);
 		}
 		initScheduleDropdowns();
+		// Re-run after full page load to catch late-rendered tables
+		window.addEventListener('load', function() {
+			setTimeout(initScheduleDropdowns, 200);
+		});
 		var map = document.querySelector('.cbi-map');
 		if (map) {
 			var _timer = null;
@@ -326,9 +348,9 @@
 		}
 		// Close any open schedule dropdown when clicking outside
 		document.addEventListener('click', function(ev) {
-			var drops = document.querySelectorAll('[id^="cbi-eqosplus-network_"] .eqos-multiselect.open');
+			var drops = document.querySelectorAll('[id^="cbi-eqosplus-network_"] .eqos-multiselect[open]');
 			for (var i = 0; i < drops.length; i++) {
-				if (!drops[i].contains(ev.target)) drops[i].classList.remove('open');
+				if (!drops[i].contains(ev.target)) drops[i].removeAttribute('open');
 			}
 		});
 	})();

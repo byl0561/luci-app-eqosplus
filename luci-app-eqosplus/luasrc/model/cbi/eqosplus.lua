@@ -33,10 +33,15 @@ if lease_file then
 	lease_file:close()
 end
 uci_cursor:foreach("dhcp", "host", function(s)
-	if s.mac and s.name then
-		hostnames[s.mac:upper()] = s.name
-		if s.ip then hostnames[s.ip] = s.name end
-	end
+    if s.mac and s.name then
+        local macs = type(s.mac) == "table" and s.mac or {s.mac}
+        for _, mac in ipairs(macs) do
+            if mac and mac ~= "" then
+                hostnames[mac:upper()] = s.name
+            end
+        end
+        if s.ip then hostnames[s.ip] = s.name end
+    end
 end)
 
 function validate_time(self, value, section)

@@ -260,26 +260,43 @@ else
 
 		# ---- Apply outbound conn limit on ns_a's IP ----
 		eqos_init_conn_table
+		# iptables backend ordering fix: eqos_forward jump MUST sit ABOVE
+		# the test's ACCEPT punches in main FORWARD, otherwise the bypass
+		# matches first and our REJECT rule never fires (the test would
+		# then PASS only by listener-not-ready coincidence — false green).
+		# Force the jump to position 1 unconditionally; idempotent and safe
+		# because production eqos_init_conn_table_ipt also targets pos 1.
+		# nft backend has its own independent table at priority -10, no
+		# ordering interaction with fw4's main forward chain — skip there.
+		if [ "$EQOS_BACKEND" = "iptables" ]; then
+			iptables  -D FORWARD -j eqos_forward 2>/dev/null
+			iptables  -I FORWARD 1 -j eqos_forward
+			ip6tables -D FORWARD -j eqos_forward 2>/dev/null
+			ip6tables -I FORWARD 1 -j eqos_forward
+		fi
 		eqos_init_conn_network "eqotest_fwd" "$FWD_VHA"
 		eqos_update_bypass_set  "eqotest_fwd" "" ""
 		eqos_add_conn "eqotest_fwd[0]" "$FWD_NS_A_IP" "1" "1" out
 
-		# Listener for the first connection
-		( ip netns exec "$FWD_NS_B" nc -l -p 19200 -w 8 < /dev/null > /dev/null 2>&1 ) &
+		# Listener pattern: `sleep N | nc -l -p PORT` keeps nc's stdin alive
+		# for N seconds so the listener stays bound long enough for our client
+		# probe to connect. Plain `nc -l -p PORT < /dev/null` triggers an
+		# immediate stdin EOF on busybox nc, which on some builds causes nc
+		# to exit before any client connects → ECONNREFUSED → false FAIL on
+		# the "raised cap allows" tests. The sleep pipe is the canonical fix.
+		( ip netns exec "$FWD_NS_B" sh -c 'sleep 10 | nc -l -p 19200 > /dev/null 2>&1' ) &
 		LP1=$!
-		sleep 1
+		sleep 2
 
 		# First TCP from ns_a → ns_b: count goes 0 → 1, allowed.
-		# Hold the connection open via a long-running stdin so it stays in
-		# conntrack ESTABLISHED while we attempt the second one.
 		( ip netns exec "$FWD_NS_A" sh -c 'sleep 6 | nc -w 6 '"$FWD_NS_B_IP"' 19200 > /dev/null 2>&1' ) &
 		FP1=$!
 		sleep 2
 
 		# Second listener for the would-be second conn
-		( ip netns exec "$FWD_NS_B" nc -l -p 19201 -w 5 < /dev/null > /dev/null 2>&1 ) &
+		( ip netns exec "$FWD_NS_B" sh -c 'sleep 8 | nc -l -p 19201 > /dev/null 2>&1' ) &
 		LP2=$!
-		sleep 1
+		sleep 2
 
 		# Second TCP from ns_a — count would go to 2 (> 1) → REJECT.
 		# nc gets ICMP unreachable / TCP RST → exits non-zero quickly.
@@ -298,9 +315,9 @@ else
 		# the previous block was specifically the connlimit, not setup noise.
 		eqos_del_conn "eqotest_fwd[0]"
 		eqos_add_conn "eqotest_fwd[0]" "$FWD_NS_A_IP" "1000" "1" out
-		( ip netns exec "$FWD_NS_B" nc -l -p 19202 -w 5 < /dev/null > /dev/null 2>&1 ) &
+		( ip netns exec "$FWD_NS_B" sh -c 'sleep 8 | nc -l -p 19202 > /dev/null 2>&1' ) &
 		LP3=$!
-		sleep 1
+		sleep 2
 		check_high_cap_passes() {
 			ip netns exec "$FWD_NS_A" nc -w 3 "$FWD_NS_B_IP" 19202 < /dev/null > /dev/null 2>&1
 			[ $? -eq 0 ]
@@ -314,15 +331,15 @@ else
 		eqos_del_conn "eqotest_fwd[0]"
 		eqos_add_conn "eqotest_fwd[0]" "$FWD_NS_B_IP" "1" "1" in
 
-		( ip netns exec "$FWD_NS_B" nc -l -p 19210 -w 8 < /dev/null > /dev/null 2>&1 ) &
+		( ip netns exec "$FWD_NS_B" sh -c 'sleep 10 | nc -l -p 19210 > /dev/null 2>&1' ) &
 		LP4=$!
-		sleep 1
+		sleep 2
 		( ip netns exec "$FWD_NS_A" sh -c 'sleep 6 | nc -w 6 '"$FWD_NS_B_IP"' 19210 > /dev/null 2>&1' ) &
 		FP2=$!
 		sleep 2
-		( ip netns exec "$FWD_NS_B" nc -l -p 19211 -w 5 < /dev/null > /dev/null 2>&1 ) &
+		( ip netns exec "$FWD_NS_B" sh -c 'sleep 8 | nc -l -p 19211 > /dev/null 2>&1' ) &
 		LP5=$!
-		sleep 1
+		sleep 2
 		check_in_second_blocked() {
 			ip netns exec "$FWD_NS_A" nc -w 3 "$FWD_NS_B_IP" 19211 < /dev/null > /dev/null 2>&1
 			[ $? -ne 0 ]
@@ -422,19 +439,30 @@ else
 
 		# Verify conn_out limit blocks 2nd concurrent TCP through the bridge
 		eqos_init_conn_table
+		# iptables ordering fix — see same block in the 2-namespace section
+		# above for rationale (force jump above test ACCEPT in main FORWARD).
+		if [ "$EQOS_BACKEND" = "iptables" ]; then
+			iptables  -D FORWARD -j eqos_forward 2>/dev/null
+			iptables  -I FORWARD 1 -j eqos_forward
+			ip6tables -D FORWARD -j eqos_forward 2>/dev/null
+			ip6tables -I FORWARD 1 -j eqos_forward
+		fi
 		eqos_init_conn_network "eqotest_sa" "$SA_BR"
 		eqos_update_bypass_set  "eqotest_sa" "" ""
 		eqos_add_conn "eqotest_sa[0]" "$SA_NS_A_IP" "1" "1" out
 
-		( ip netns exec "$SA_NS_B" nc -l -p 19300 -w 8 < /dev/null > /dev/null 2>&1 ) &
+		# Same `sleep N | nc -l` listener pattern as the 2-namespace section
+		# (see comment there). Avoids busybox nc's stdin-EOF immediate-exit
+		# quirk that breaks the "raised cap allows" probe.
+		( ip netns exec "$SA_NS_B" sh -c 'sleep 10 | nc -l -p 19300 > /dev/null 2>&1' ) &
 		SAP1=$!
-		sleep 1
+		sleep 2
 		( ip netns exec "$SA_NS_A" sh -c 'sleep 6 | nc -w 6 '"$SA_NS_B_IP"' 19300 > /dev/null 2>&1' ) &
 		SAF1=$!
 		sleep 2
-		( ip netns exec "$SA_NS_B" nc -l -p 19301 -w 5 < /dev/null > /dev/null 2>&1 ) &
+		( ip netns exec "$SA_NS_B" sh -c 'sleep 8 | nc -l -p 19301 > /dev/null 2>&1' ) &
 		SAP2=$!
-		sleep 1
+		sleep 2
 
 		check_sa_blocked() {
 			ip netns exec "$SA_NS_A" nc -w 3 "$SA_NS_B_IP" 19301 < /dev/null > /dev/null 2>&1
@@ -449,9 +477,9 @@ else
 		# Quick sanity: lifting cap restores connectivity in the same hairpin
 		eqos_del_conn "eqotest_sa[0]"
 		eqos_add_conn "eqotest_sa[0]" "$SA_NS_A_IP" "1000" "1" out
-		( ip netns exec "$SA_NS_B" nc -l -p 19302 -w 5 < /dev/null > /dev/null 2>&1 ) &
+		( ip netns exec "$SA_NS_B" sh -c 'sleep 8 | nc -l -p 19302 > /dev/null 2>&1' ) &
 		SAP3=$!
-		sleep 1
+		sleep 2
 		check_sa_pass() {
 			ip netns exec "$SA_NS_A" nc -w 3 "$SA_NS_B_IP" 19302 < /dev/null > /dev/null 2>&1
 			[ $? -eq 0 ]

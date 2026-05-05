@@ -738,9 +738,29 @@
 	}
 	function _testDone(btn, out, origLabel, result) {
 		out.value = (result && result.output) || '<%=translate("No output")%>';
+		// Auto-scroll to the bottom so the final summary block (`Total: ...
+		// Pass: ... Fail: ...`) is in view — both test scripts call test_report
+		// at the very end and that's what users want to see first.
+		out.scrollTop = out.scrollHeight;
 		btn.value = origLabel;
 		_testRunning = false;
 		_setAllTestBtns(false);
+	}
+
+	// Module-level poll state. Switching from one test to another (e.g. user
+	// runs Structure Test then immediately Traffic Test) requires forcibly
+	// stopping the previous poll — otherwise BOTH pollers race and two
+	// different log files alternate-flicker into the same textarea, and the
+	// stale poll's _testDone calls keep flipping buttons back to "enabled"
+	// while the new test is still running.
+	var _testActivePoll = null;
+	var _testGen = 0;
+
+	function _stopActivePoll() {
+		if (_testActivePoll) {
+			try { XHR.stop(_testActivePoll); } catch (e) {}
+			_testActivePoll = null;
+		}
 	}
 
 	function doRunTest(btn, out, origLabel, testUrl) {
@@ -748,19 +768,25 @@
 		// The backend writes test output to a tmp log; each poll returns the
 		// log so far + a "running" flag. uhttpd never sees a long request,
 		// so script_timeout (default 60s) doesn't cut us off mid-test.
+		_stopActivePoll();
+		var thisGen = ++_testGen;
+
 		btn.value = '<%=translate("Running...")%>';
 		out.value = '<%=translate("Running tests, please wait...")%>';
-		var pollFn = null;
 		var firstResp = true;
-		pollFn = function(x, r) {
+		var pollFn = function(x, r) {
+			// Generation guard: an in-flight poll from an earlier test run
+			// would have a stale `thisGen` and silently bail out. Belt-and-
+			// suspenders against any edge case where XHR.stop didn't take.
+			if (thisGen !== _testGen) return;
 			if (r) {
-				// Show streaming output as it's produced (autoscroll to end).
 				if (r.output != null) {
 					out.value = r.output;
 					out.scrollTop = out.scrollHeight;
 				}
 				if (!r.running && !firstResp) {
-					if (pollFn) XHR.stop(pollFn);
+					try { XHR.stop(pollFn); } catch (e) {}
+					if (_testActivePoll === pollFn) _testActivePoll = null;
 					_testDone(btn, out, origLabel, r);
 				}
 				firstResp = false;
@@ -768,7 +794,9 @@
 		};
 		// Kick off the test (action=start), then start polling.
 		XHR.get(testUrl + '?action=start', null, function(x, r) {
+			if (thisGen !== _testGen) return;  // user already started another
 			pollFn(x, r);
+			_testActivePoll = pollFn;
 			XHR.poll(1, testUrl, null, pollFn);
 		});
 	}

@@ -148,6 +148,322 @@ check_ip_dl() { [ "$IP_DL_BYTES" -gt 0 ]; }
 assert "IP-based rule: traffic hits rate-limited class" check_ip_dl
 
 echo ""
+echo "-- Connection limit (real TCP via FORWARD chain) --"
+
+# Uses a dedicated 2-namespace topology so traffic actually traverses the
+# host's FORWARD chain (where our connlimit rules sit). The default veth
+# topology above (ns → host) hits INPUT and bypasses our rules entirely.
+#
+#   ns_a (10.66.66.2) ─veth─ host (10.66.66.1 / 10.66.77.1) ─veth─ ns_b (10.66.77.2)
+#                                    ip_forward=1
+#
+# All test state is namespaced under names with 'eqfwd_' prefix to avoid
+# collisions; everything is torn down on exit even if assertions fail.
+
+if   command -v nft      >/dev/null 2>&1; then EQOS_BACKEND=nft
+elif command -v iptables >/dev/null 2>&1 && command -v ipset >/dev/null 2>&1; then EQOS_BACKEND=iptables
+else EQOS_BACKEND=none; fi
+export EQOS_BACKEND
+
+FWD_NS_A="eqfwd_a"
+FWD_NS_B="eqfwd_b"
+FWD_VHA="eqfwd_vha"   # host-side veth peering with ns_a
+FWD_VHB="eqfwd_vhb"
+FWD_VCA="eqfwd_vca"   # ns_a-side veth (moved into ns_a)
+FWD_VCB="eqfwd_vcb"
+FWD_HOST_A="10.66.66.1"; FWD_NS_A_IP="10.66.66.2"
+FWD_HOST_B="10.66.77.1"; FWD_NS_B_IP="10.66.77.2"
+FWD_PREV_FORWARD=""
+FWD_FW_HANDLES=""   # nft fw4 handles we punched ACCEPT holes with
+FWD_SETUP_OK=0
+
+# Cleanup is idempotent and runs unconditionally — this protects the host
+# even when setup aborts halfway (so we never leave ip_forward toggled or
+# stale firewall holes in fw4/fw3).
+#
+# IMPORTANT: must NOT call eqos_teardown_conn_table — that would also wipe
+# production rules. Tear down only our test-scoped network ("eqotest_fwd").
+cleanup_fwd() {
+	# Restore ip_forward (only if we recorded a prior value)
+	[ -n "$FWD_PREV_FORWARD" ] && \
+		echo "$FWD_PREV_FORWARD" > /proc/sys/net/ipv4/ip_forward 2>/dev/null
+	# Remove fw4/nft holes by handle
+	if [ -n "$FWD_FW_HANDLES" ]; then
+		for h in $FWD_FW_HANDLES; do
+			nft delete rule inet fw4 forward handle "$h" 2>/dev/null
+		done
+	fi
+	# Remove fw3/iptables holes by exact match
+	iptables -D FORWARD -i "$FWD_VHA" -o "$FWD_VHB" -j ACCEPT 2>/dev/null
+	iptables -D FORWARD -i "$FWD_VHB" -o "$FWD_VHA" -j ACCEPT 2>/dev/null
+	# Always nuke namespaces and veths (idempotent — silently no-op if absent)
+	ip netns del "$FWD_NS_A" 2>/dev/null
+	ip netns del "$FWD_NS_B" 2>/dev/null
+	ip link del "$FWD_VHA" 2>/dev/null
+	ip link del "$FWD_VHB" 2>/dev/null
+	# Only nuke OUR test-scoped network — production rules in the same
+	# table must survive a test run.
+	eqos_teardown_conn_network "eqotest_fwd" 2>/dev/null
+}
+trap 'cleanup; cleanup_fwd' EXIT
+
+if [ "$EQOS_BACKEND" = "none" ] || ! command -v nc >/dev/null 2>&1; then
+	echo "(skipped: missing nft/iptables or nc)"
+elif [ ! -w /proc/sys/net/ipv4/ip_forward ]; then
+	echo "(skipped: cannot enable ip_forward — not root or read-only proc)"
+else
+	# ---- Setup ----
+	FWD_PREV_FORWARD=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)
+	echo 1 > /proc/sys/net/ipv4/ip_forward
+
+	if ip netns add "$FWD_NS_A" 2>/dev/null \
+		&& ip netns add "$FWD_NS_B" 2>/dev/null \
+		&& ip link add "$FWD_VHA" type veth peer name "$FWD_VCA" 2>/dev/null \
+		&& ip link add "$FWD_VHB" type veth peer name "$FWD_VCB" 2>/dev/null \
+		&& ip link set "$FWD_VCA" netns "$FWD_NS_A" 2>/dev/null \
+		&& ip link set "$FWD_VCB" netns "$FWD_NS_B" 2>/dev/null
+	then
+		ip addr add "$FWD_HOST_A/24" dev "$FWD_VHA"
+		ip addr add "$FWD_HOST_B/24" dev "$FWD_VHB"
+		ip link set "$FWD_VHA" up
+		ip link set "$FWD_VHB" up
+		ip netns exec "$FWD_NS_A" sh -c "
+			ip addr add $FWD_NS_A_IP/24 dev $FWD_VCA
+			ip link set $FWD_VCA up; ip link set lo up
+			ip route add default via $FWD_HOST_A
+		"
+		ip netns exec "$FWD_NS_B" sh -c "
+			ip addr add $FWD_NS_B_IP/24 dev $FWD_VCB
+			ip link set $FWD_VCB up; ip link set lo up
+			ip route add default via $FWD_HOST_B
+		"
+
+		# Punch ACCEPT holes through host's main firewall so unrelated zone
+		# rules don't drop our forwarded test traffic.
+		# fw4 (nftables): capture handles to delete cleanly later.
+		if [ "$EQOS_BACKEND" = "nft" ]; then
+			h1=$(nft -a -e insert rule inet fw4 forward iifname "$FWD_VHA" oifname "$FWD_VHB" accept 2>/dev/null | awk '/handle/{print $NF}')
+			h2=$(nft -a -e insert rule inet fw4 forward iifname "$FWD_VHB" oifname "$FWD_VHA" accept 2>/dev/null | awk '/handle/{print $NF}')
+			FWD_FW_HANDLES="$h1 $h2"
+		else
+			iptables -I FORWARD -i "$FWD_VHA" -o "$FWD_VHB" -j ACCEPT 2>/dev/null
+			iptables -I FORWARD -i "$FWD_VHB" -o "$FWD_VHA" -j ACCEPT 2>/dev/null
+		fi
+
+		FWD_SETUP_OK=1
+	fi
+
+	if [ "$FWD_SETUP_OK" = "1" ]; then
+		# Sanity: forwarding actually works before we add limits
+		assert "fwd setup: ns_a → ns_b ICMP succeeds" \
+			ip netns exec "$FWD_NS_A" ping -c 2 -W 2 "$FWD_NS_B_IP"
+
+		# ---- Apply outbound conn limit on ns_a's IP ----
+		eqos_init_conn_table
+		eqos_init_conn_network "eqotest_fwd" "$FWD_VHA"
+		eqos_update_bypass_set  "eqotest_fwd" "" ""
+		eqos_add_conn "eqotest_fwd[0]" "$FWD_NS_A_IP" "1" "1" out
+
+		# Listener for the first connection
+		( ip netns exec "$FWD_NS_B" nc -l -p 19200 -w 8 < /dev/null > /dev/null 2>&1 ) &
+		LP1=$!
+		sleep 1
+
+		# First TCP from ns_a → ns_b: count goes 0 → 1, allowed.
+		# Hold the connection open via a long-running stdin so it stays in
+		# conntrack ESTABLISHED while we attempt the second one.
+		( ip netns exec "$FWD_NS_A" sh -c 'sleep 6 | nc -w 6 '"$FWD_NS_B_IP"' 19200 > /dev/null 2>&1' ) &
+		FP1=$!
+		sleep 2
+
+		# Second listener for the would-be second conn
+		( ip netns exec "$FWD_NS_B" nc -l -p 19201 -w 5 < /dev/null > /dev/null 2>&1 ) &
+		LP2=$!
+		sleep 1
+
+		# Second TCP from ns_a — count would go to 2 (> 1) → REJECT.
+		# nc gets ICMP unreachable / TCP RST → exits non-zero quickly.
+		check_second_blocked() {
+			ip netns exec "$FWD_NS_A" nc -w 3 "$FWD_NS_B_IP" 19201 < /dev/null > /dev/null 2>&1
+			[ $? -ne 0 ]
+		}
+		assert "conn_out limit=1: 2nd concurrent TCP REJECTed via FORWARD" check_second_blocked
+
+		# Wait for first conn / listeners to wind down
+		wait $FP1 2>/dev/null
+		wait $LP1 2>/dev/null
+		wait $LP2 2>/dev/null
+
+		# Lift the limit and verify the same direction now passes — proves
+		# the previous block was specifically the connlimit, not setup noise.
+		eqos_del_conn "eqotest_fwd[0]"
+		eqos_add_conn "eqotest_fwd[0]" "$FWD_NS_A_IP" "1000" "1" out
+		( ip netns exec "$FWD_NS_B" nc -l -p 19202 -w 5 < /dev/null > /dev/null 2>&1 ) &
+		LP3=$!
+		sleep 1
+		check_high_cap_passes() {
+			ip netns exec "$FWD_NS_A" nc -w 3 "$FWD_NS_B_IP" 19202 < /dev/null > /dev/null 2>&1
+			[ $? -eq 0 ]
+		}
+		assert "conn_out limit=1000: previously-blocked direction passes" check_high_cap_passes
+		wait $LP3 2>/dev/null
+
+		# ---- Inbound test: limit ns_b's incoming TCP from any source ----
+		# Direction "in" matches ip daddr = $FWD_NS_B_IP. With limit=1, the
+		# first TCP into ns_b takes a slot; the second must REJECT.
+		eqos_del_conn "eqotest_fwd[0]"
+		eqos_add_conn "eqotest_fwd[0]" "$FWD_NS_B_IP" "1" "1" in
+
+		( ip netns exec "$FWD_NS_B" nc -l -p 19210 -w 8 < /dev/null > /dev/null 2>&1 ) &
+		LP4=$!
+		sleep 1
+		( ip netns exec "$FWD_NS_A" sh -c 'sleep 6 | nc -w 6 '"$FWD_NS_B_IP"' 19210 > /dev/null 2>&1' ) &
+		FP2=$!
+		sleep 2
+		( ip netns exec "$FWD_NS_B" nc -l -p 19211 -w 5 < /dev/null > /dev/null 2>&1 ) &
+		LP5=$!
+		sleep 1
+		check_in_second_blocked() {
+			ip netns exec "$FWD_NS_A" nc -w 3 "$FWD_NS_B_IP" 19211 < /dev/null > /dev/null 2>&1
+			[ $? -ne 0 ]
+		}
+		assert "conn_in limit=1: 2nd inbound TCP REJECTed via FORWARD" check_in_second_blocked
+		wait $FP2 2>/dev/null
+		wait $LP4 2>/dev/null
+		wait $LP5 2>/dev/null
+	else
+		echo "(skipped: 2-namespace setup failed; not root or veth/netns missing)"
+	fi
+fi
+
+echo ""
+echo "-- Connection limit (single-arm / bridge hairpin) --"
+
+# Single-arm topology: both namespaces' host-side veths are bridge ports of
+# one br_eqsa. The bridge carries TWO IP subnets (multi-subnet hairpin), so
+# routing from ns_a's subnet to ns_b's subnet enters and exits via the same
+# L3 interface (the bridge). FORWARD chain sees iifname == oifname == br_eqsa.
+# This proves conn_limit works for the typical "PCDN sub-router on the LAN
+# with one ethernet port" deployment shape.
+
+SA_NS_A="eqsa_a"; SA_NS_B="eqsa_b"
+SA_VHA="eqsa_vha"; SA_VCA="eqsa_vca"
+SA_VHB="eqsa_vhb"; SA_VCB="eqsa_vcb"
+SA_BR="br_eqsa"
+SA_HOST_A="10.66.88.1"; SA_NS_A_IP="10.66.88.2"
+SA_HOST_B="10.66.99.1"; SA_NS_B_IP="10.66.99.2"
+SA_FW_HANDLES=""
+SA_SETUP_OK=0
+
+cleanup_sa() {
+	if [ -n "$SA_FW_HANDLES" ]; then
+		for h in $SA_FW_HANDLES; do
+			nft delete rule inet fw4 forward handle "$h" 2>/dev/null
+		done
+	fi
+	iptables -D FORWARD -i "$SA_BR" -o "$SA_BR" -j ACCEPT 2>/dev/null
+	ip netns del "$SA_NS_A" 2>/dev/null
+	ip netns del "$SA_NS_B" 2>/dev/null
+	ip link del "$SA_VHA" 2>/dev/null
+	ip link del "$SA_VHB" 2>/dev/null
+	ip link del "$SA_BR"  2>/dev/null
+	# Only nuke OUR test-scoped network — production rules survive.
+	eqos_teardown_conn_network "eqotest_sa" 2>/dev/null
+}
+trap 'cleanup; cleanup_fwd; cleanup_sa' EXIT
+
+if [ "$EQOS_BACKEND" = "none" ] || ! command -v nc >/dev/null 2>&1 \
+	|| [ ! -w /proc/sys/net/ipv4/ip_forward ]; then
+	echo "(skipped: missing nft/iptables, nc, or non-writable ip_forward)"
+else
+	if ip link add "$SA_BR" type bridge 2>/dev/null \
+		&& ip netns add "$SA_NS_A" 2>/dev/null \
+		&& ip netns add "$SA_NS_B" 2>/dev/null \
+		&& ip link add "$SA_VHA" type veth peer name "$SA_VCA" 2>/dev/null \
+		&& ip link add "$SA_VHB" type veth peer name "$SA_VCB" 2>/dev/null \
+		&& ip link set "$SA_VCA" netns "$SA_NS_A" 2>/dev/null \
+		&& ip link set "$SA_VCB" netns "$SA_NS_B" 2>/dev/null
+	then
+		# Both veths are bridge ports — host's L3 endpoint is the bridge
+		ip link set "$SA_VHA" master "$SA_BR"
+		ip link set "$SA_VHB" master "$SA_BR"
+		ip link set "$SA_VHA" up
+		ip link set "$SA_VHB" up
+		ip addr add "$SA_HOST_A/24" dev "$SA_BR"   # primary
+		ip addr add "$SA_HOST_B/24" dev "$SA_BR"   # secondary on same bridge
+		ip link set "$SA_BR" up
+
+		ip netns exec "$SA_NS_A" sh -c "
+			ip addr add $SA_NS_A_IP/24 dev $SA_VCA
+			ip link set $SA_VCA up; ip link set lo up
+			ip route add default via $SA_HOST_A
+		"
+		ip netns exec "$SA_NS_B" sh -c "
+			ip addr add $SA_NS_B_IP/24 dev $SA_VCB
+			ip link set $SA_VCB up; ip link set lo up
+			ip route add default via $SA_HOST_B
+		"
+
+		# Punch ACCEPT hole in main firewall — single-arm uses the SAME
+		# iifname=oifname=$SA_BR, so the rule has no oifname distinction.
+		if [ "$EQOS_BACKEND" = "nft" ]; then
+			h=$(nft -a -e insert rule inet fw4 forward iifname "$SA_BR" oifname "$SA_BR" accept 2>/dev/null | awk '/handle/{print $NF}')
+			SA_FW_HANDLES="$h"
+		else
+			iptables -I FORWARD -i "$SA_BR" -o "$SA_BR" -j ACCEPT 2>/dev/null
+		fi
+		SA_SETUP_OK=1
+	fi
+
+	if [ "$SA_SETUP_OK" = "1" ]; then
+		# Sanity: hairpin routing actually works
+		assert "single-arm: ns_a → ns_b ping (iifname=oifname)" \
+			ip netns exec "$SA_NS_A" ping -c 2 -W 2 "$SA_NS_B_IP"
+
+		# Verify conn_out limit blocks 2nd concurrent TCP through the bridge
+		eqos_init_conn_table
+		eqos_init_conn_network "eqotest_sa" "$SA_BR"
+		eqos_update_bypass_set  "eqotest_sa" "" ""
+		eqos_add_conn "eqotest_sa[0]" "$SA_NS_A_IP" "1" "1" out
+
+		( ip netns exec "$SA_NS_B" nc -l -p 19300 -w 8 < /dev/null > /dev/null 2>&1 ) &
+		SAP1=$!
+		sleep 1
+		( ip netns exec "$SA_NS_A" sh -c 'sleep 6 | nc -w 6 '"$SA_NS_B_IP"' 19300 > /dev/null 2>&1' ) &
+		SAF1=$!
+		sleep 2
+		( ip netns exec "$SA_NS_B" nc -l -p 19301 -w 5 < /dev/null > /dev/null 2>&1 ) &
+		SAP2=$!
+		sleep 1
+
+		check_sa_blocked() {
+			ip netns exec "$SA_NS_A" nc -w 3 "$SA_NS_B_IP" 19301 < /dev/null > /dev/null 2>&1
+			[ $? -ne 0 ]
+		}
+		assert "single-arm: 2nd TCP REJECTed (iifname=oifname=$SA_BR)" check_sa_blocked
+
+		wait $SAF1 2>/dev/null
+		wait $SAP1 2>/dev/null
+		wait $SAP2 2>/dev/null
+
+		# Quick sanity: lifting cap restores connectivity in the same hairpin
+		eqos_del_conn "eqotest_sa[0]"
+		eqos_add_conn "eqotest_sa[0]" "$SA_NS_A_IP" "1000" "1" out
+		( ip netns exec "$SA_NS_B" nc -l -p 19302 -w 5 < /dev/null > /dev/null 2>&1 ) &
+		SAP3=$!
+		sleep 1
+		check_sa_pass() {
+			ip netns exec "$SA_NS_A" nc -w 3 "$SA_NS_B_IP" 19302 < /dev/null > /dev/null 2>&1
+			[ $? -eq 0 ]
+		}
+		assert "single-arm: raised cap allows hairpin TCP" check_sa_pass
+		wait $SAP3 2>/dev/null
+	else
+		echo "(skipped: bridge / namespace setup failed)"
+	fi
+fi
+
+echo ""
 echo "-- Teardown verification --"
 
 eqos_teardown_dev "$VETH_HOST"

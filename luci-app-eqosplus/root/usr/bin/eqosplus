@@ -11,6 +11,25 @@ NETWORKS="/var/$NAME.networks"
 GENERATION="/var/$NAME.generation"
 LOGFILE="/tmp/$NAME.log"
 LOG_LEVEL=$(uci -q get "$NAME.@eqosplus[0].log_level" 2>/dev/null || echo 0)
+# Backend for connection-limit rules: nft | iptables | none.
+# Resolved at install (postinst writes UCI option). Empty / unknown values
+# fall through to runtime detection. We also self-heal if the UCI-pinned
+# backend's binary is missing — covers users switching firewall toolchain
+# (e.g. uninstalling iptables after an OS upgrade) without re-running postinst.
+EQOS_BACKEND=$(uci -q get "$NAME.@eqosplus[0].backend" 2>/dev/null)
+case "$EQOS_BACKEND" in
+	nft)      command -v nft      >/dev/null 2>&1 || EQOS_BACKEND= ;;
+	iptables) command -v iptables >/dev/null 2>&1 || EQOS_BACKEND= ;;
+	none) ;;
+	*) EQOS_BACKEND= ;;
+esac
+if [ -z "$EQOS_BACKEND" ]; then
+	if   command -v nft      >/dev/null 2>&1; then EQOS_BACKEND=nft
+	elif command -v iptables >/dev/null 2>&1; then EQOS_BACKEND=iptables
+	else                                           EQOS_BACKEND=none
+	fi
+fi
+export EQOS_BACKEND
 bin_tc=$(command -v tc)
 bin_ip=$(command -v ip)
 
@@ -125,8 +144,22 @@ _get_uci_field() {
 	echo "$_uci_cache" | grep -F ".${section}.${field}='" | head -1 | _uci_unquote
 }
 
-# Batch-extract mac, download, upload for a rule section in one awk pass (1 fork instead of 12)
-# Output: mac|dl_kbit|ul_kbit (pipe-delimited, rates pre-converted from MB/s to kbit/s)
+# Read a rule's identifier (target field, falling back to legacy mac field).
+# Mirrors the dual-read logic in _get_uci_rule_fields and the CBI cfgvalue.
+_get_uci_target() {
+	local v
+	v=$(_get_uci_field "$1" "target")
+	[ -n "$v" ] || v=$(_get_uci_field "$1" "mac")
+	echo "$v"
+}
+
+# Batch-extract identifier, download, upload, conn_in, conn_out, tcp_only for a
+# rule section in one awk pass.
+# Output: addr|dl_kbit|ul_kbit|conn_in|conn_out|tcp_only
+#   - addr is read from UCI option "target", falling back to legacy "mac".
+#     Old releases briefly stored "<mac>#<ipv4>"; callers should defensively
+#     strip after the first '#' for back-compat with rules saved at that time.
+#   - tcp_only defaults to 1 when missing.
 _get_uci_rule_fields() {
 	echo "$_uci_cache" | awk -v sect=".${1}." '
 	function uq(s) {
@@ -136,10 +169,20 @@ _get_uci_rule_fields() {
 		gsub(/\001/, "\047", s)
 		return s
 	}
-	!gm && index($0, sect "mac=\047")      { m = uq($0); gm = 1 }
-	!gd && index($0, sect "download=\047") { d = uq($0); gd = 1 }
-	!gu && index($0, sect "upload=\047")   { u = uq($0); gu = 1 }
-	END { d += 0; u += 0; printf "%s|%d|%d\n", m, d * 8000, u * 8000 }
+	!gtg && index($0, sect "target=\047")    { tg = uq($0); gtg = 1 }
+	!gm  && index($0, sect "mac=\047")       { m  = uq($0); gm  = 1 }
+	!gd  && index($0, sect "download=\047")  { d  = uq($0); gd  = 1 }
+	!gu  && index($0, sect "upload=\047")    { u  = uq($0); gu  = 1 }
+	!gci && index($0, sect "conn_in=\047")   { ci = uq($0); gci = 1 }
+	!gco && index($0, sect "conn_out=\047")  { co = uq($0); gco = 1 }
+	!gt  && index($0, sect "tcp_only=\047")  { t  = uq($0); gt  = 1 }
+	END {
+		d += 0; u += 0; ci += 0; co += 0
+		if (!gt) t = "1"
+		# Prefer target; fall back to mac for legacy rules
+		addr = (gtg && tg != "") ? tg : m
+		printf "%s|%d|%d|%d|%d|%s\n", addr, d * 8000, u * 8000, ci, co, t
+	}
 	'
 }
 
@@ -247,10 +290,16 @@ start_network() {
 		return 1
 	fi
 
+	# Initialize connlimit per-network bypass infrastructure (no-op if backend=none).
+	# Always created so set membership can later be populated regardless of zone_bypass.
+	eqos_init_conn_network "$network" "$dev"
+
 	# Add bypass for same-zone networks (ensures same-zone traffic skips rate limiting)
 	local zone_bypass=$(_get_uci_field "@eqosplus[0]" "zone_bypass")
 	local my_zone
 	[ "$zone_bypass" != "0" ] && my_zone=$(get_zone_for_network "$network")
+	# Accumulate v4/v6 bypass subnets for the conn_limit bypass set
+	local _conn_bypass_v4="" _conn_bypass_v6=""
 	if [ -n "$my_zone" ]; then
 		local bypass_prio=100
 		# Collect all peer device names (single pass)
@@ -281,6 +330,11 @@ start_network() {
 					_bp_had_fail=true
 				fi
 				bypass_prio=$((bypass_prio + 1))
+				# Mirror into conn_limit bypass set (only when zone_bypass is enabled)
+				case "$proto" in
+					ip)   _conn_bypass_v4="${_conn_bypass_v4:+$_conn_bypass_v4 }$subnet" ;;
+					ipv6) _conn_bypass_v6="${_conn_bypass_v6:+$_conn_bypass_v6 }$subnet" ;;
+				esac
 			done <<EOF
 $_bp_subnets
 EOF
@@ -289,6 +343,8 @@ EOF
 			fi
 		fi
 	fi
+	# Push the collected subnets into the conn_limit bypass set (or empty if disabled)
+	eqos_update_bypass_set "$network" "$_conn_bypass_v4" "$_conn_bypass_v6"
 
 	local tmpf
 	tmpf=$(safe_mktemp) || return 1
@@ -343,6 +399,10 @@ stop_network() {
 	else
 		eqos_teardown_dev "$dev"
 	fi
+
+	# Connlimit bypass + per-network sets are network-scoped, not device-scoped:
+	# always tear them down for the stopped network, regardless of device sharing.
+	eqos_teardown_conn_network "$network"
 }
 
 sync_networks() {
@@ -449,7 +509,7 @@ cal_uuid() {
 del_id() {
 	local addr network dev id
 	[ -n "$_uci_cache" ] || _uci_cache=$(uci show "$NAME" 2>/dev/null)
-	addr=$(_get_uci_field "@network_$1" "mac")
+	addr=$(_get_uci_target "@network_$1")
 	network="${1%%\[*}"
 	dev=$(get_net_device "$network") || {
 		log_msg 1 "del_id: network $network has no device, skipping"
@@ -468,6 +528,9 @@ del_id() {
 
 	log_msg 2 "del_id $1 id=$id addr=$addr dev=$dev"
 	eqos_del_id "$dev" "$id"
+	# Conn rules are tagged by the rule's UCI section identifier ("$1"),
+	# not by cal_uuid — see core.sh comment scheme.
+	eqos_del_conn "$1"
 
 	# Accumulate for batch flush if active, otherwise write immediately
 	if [ -n "$_batch_mode" ]; then
@@ -479,13 +542,23 @@ del_id() {
 }
 
 add_mac() {
-	local mac DL UL network dev id _fields
+	local mac DL UL CI CO TO network dev id _fields
 	[ -n "$_uci_cache" ] || _uci_cache=$(uci show "$NAME" 2>/dev/null)
 	_fields=$(_get_uci_rule_fields "@network_$1")
 	mac="${_fields%%|*}"; _fields="${_fields#*|}"
-	DL="${_fields%%|*}"
-	UL="${_fields#*|}"
-	DL=${DL:-0}; UL=${UL:-0}
+	DL="${_fields%%|*}"; _fields="${_fields#*|}"
+	UL="${_fields%%|*}"; _fields="${_fields#*|}"
+	CI="${_fields%%|*}"; _fields="${_fields#*|}"
+	CO="${_fields%%|*}"
+	TO="${_fields#*|}"
+	DL=${DL:-0}; UL=${UL:-0}; CI=${CI:-0}; CO=${CO:-0}; TO=${TO:-1}
+
+	# Defensive: legacy rules (pre-cleanup) may still carry "<mac>#<ipv4>" or
+	# similar in the target field. Strip everything from '#' onward — MAC
+	# identifiers no longer carry encoded IPs, and connection-limit rules
+	# below are simply skipped for MAC.
+	case "$mac" in *#*) mac="${mac%%#*}" ;; esac
+
 	network="${1%%\[*}"
 	dev=$(get_net_device "$network") || {
 		log_msg 1 "add_mac: network $network has no device, skipping"
@@ -501,10 +574,26 @@ add_mac() {
 		eqos_del_id "$old_dev" "$id"
 	fi
 
-	log_msg 2 "add_mac $1 id=$id mac=$mac UL=${UL}kbit DL=${DL}kbit dev=$dev"
-	if ! eqos_add_mac "$dev" "$id" "$mac" "$DL" "$UL"; then
-		log_msg 1 "add_mac: eqos_add_mac failed for $1"
-		return 1
+	log_msg 2 "add_mac $1 id=$id mac=$mac UL=${UL}kbit DL=${DL}kbit CI=${CI} CO=${CO} tcp_only=${TO} dev=$dev"
+	# Apply tc rate limit only when at least one direction is non-zero
+	if [ "$DL" -gt 0 ] || [ "$UL" -gt 0 ]; then
+		if ! eqos_add_mac "$dev" "$id" "$mac" "$DL" "$UL"; then
+			log_msg 1 "add_mac: eqos_add_mac failed for $1"
+			return 1
+		fi
+	else
+		eqos_del_id "$dev" "$id"
+	fi
+
+	# Connection limits are NOT supported for MAC identifiers (the FORWARD
+	# chain can't match L2 destination MAC for inbound traffic, and the UI
+	# disables conn_in/out inputs when MAC is selected). Sweep any leftover
+	# conn rule for this id (e.g. from an older release that did support it),
+	# but never install a new one. If conn_in/out > 0 reaches us here, it
+	# means the form was bypassed — log and ignore.
+	eqos_del_conn "$1"
+	if [ "$CI" -gt 0 ] || [ "$CO" -gt 0 ]; then
+		log_msg 1 "add_mac $1: conn_in/conn_out are ignored on MAC identifiers (CI=$CI CO=$CO); use an IP/CIDR rule instead"
 	fi
 
 	# Accumulate for batch flush if active, otherwise write immediately
@@ -517,13 +606,26 @@ add_mac() {
 }
 
 add_ip() {
-	local ip_addr DL UL network dev id _fields
+	local ip_addr DL UL CI CO TO network dev id _fields
 	[ -n "$_uci_cache" ] || _uci_cache=$(uci show "$NAME" 2>/dev/null)
 	_fields=$(_get_uci_rule_fields "@network_$1")
 	ip_addr="${_fields%%|*}"; _fields="${_fields#*|}"
-	DL="${_fields%%|*}"
-	UL="${_fields#*|}"
-	DL=${DL:-0}; UL=${UL:-0}
+	DL="${_fields%%|*}"; _fields="${_fields#*|}"
+	UL="${_fields%%|*}"; _fields="${_fields#*|}"
+	CI="${_fields%%|*}"; _fields="${_fields#*|}"
+	CO="${_fields%%|*}"
+	TO="${_fields#*|}"
+	DL=${DL:-0}; UL=${UL:-0}; CI=${CI:-0}; CO=${CO:-0}; TO=${TO:-1}
+	# Defensive: IP rules shouldn't have "#" encoding, but strip just in case.
+	case "$ip_addr" in *#*) ip_addr="${ip_addr%%#*}" ;; esac
+	# Empty target — the section was deleted between cache and read, or the
+	# user saved a half-edited row. Skip cleanly rather than feed empty addr
+	# to nft/iptables/tc and accumulate failure logs downstream.
+	if [ -z "$ip_addr" ]; then
+		log_msg 1 "add_ip: empty target for $1, skipping"
+		return 1
+	fi
+
 	network="${1%%\[*}"
 	dev=$(get_net_device "$network") || {
 		log_msg 1 "add_ip: network $network has no device, skipping"
@@ -539,10 +641,25 @@ add_ip() {
 		eqos_del_id "$old_dev" "$id"
 	fi
 
-	log_msg 2 "add_ip $1 id=$id ip=$ip_addr UL=${UL}kbit DL=${DL}kbit dev=$dev"
-	if ! eqos_add_ip "$dev" "$id" "$ip_addr" "$DL" "$UL"; then
-		log_msg 1 "add_ip: eqos_add_ip failed for $1"
-		return 1
+	log_msg 2 "add_ip $1 id=$id ip=$ip_addr UL=${UL}kbit DL=${DL}kbit CI=${CI} CO=${CO} tcp_only=${TO} dev=$dev"
+	if [ "$DL" -gt 0 ] || [ "$UL" -gt 0 ]; then
+		if ! eqos_add_ip "$dev" "$id" "$ip_addr" "$DL" "$UL"; then
+			log_msg 1 "add_ip: eqos_add_ip failed for $1"
+			return 1
+		fi
+	else
+		eqos_del_id "$dev" "$id"
+	fi
+
+	# Connection limit: clear once, then add per-direction.
+	eqos_del_conn "$1"
+	if [ "$CO" -gt 0 ]; then
+		eqos_add_conn "$1" "$ip_addr" "$CO" "$TO" out \
+			|| log_msg 1 "add_ip: eqos_add_conn out failed for $1"
+	fi
+	if [ "$CI" -gt 0 ]; then
+		eqos_add_conn "$1" "$ip_addr" "$CI" "$TO" in \
+			|| log_msg 1 "add_ip: eqos_add_conn in failed for $1"
 	fi
 
 	# Accumulate for batch flush if active, otherwise write immediately
@@ -555,15 +672,101 @@ add_ip() {
 }
 
 # Dispatch a rule ID to the appropriate add function (MAC or IP).
-# UCI field "mac" is a historical name — it holds either a MAC address or IP/CIDR.
+# Identifier is in UCI option "target" (falls back to legacy "mac").
+# Defensive strip of any "#..." suffix (legacy encoding from older releases
+# that put the resolved IPv4 / IPv6 alongside the MAC). Current release
+# stores bare values only.
 _add_rule() {
-	local id=$1 device
-	device=$(_get_uci_field "@network_$id" "mac")
-	if is_macaddr "$device"; then
+	local id=$1 device device_bare
+	device=$(_get_uci_target "@network_$id")
+	case "$device" in *#*) device_bare="${device%%#*}" ;; *) device_bare="$device" ;; esac
+	if is_macaddr "$device_bare"; then
 		add_mac "$id"
 	else
 		add_ip "$id"
 	fi
+}
+
+# Re-apply connlimit infrastructure for one network without touching tc.
+# Used by conn_reload after fw3 flushes our iptables chain.
+# Mirrors the conn-related portion of start_network (init + bypass set population).
+_reapply_conn_for_network() {
+	local network=$1 dev
+	[ -n "$network" ] || return 1
+	dev=$(get_net_device "$network") || return 1
+	eqos_init_conn_network "$network" "$dev"
+
+	local zone_bypass=$(_get_uci_field "@eqosplus[0]" "zone_bypass")
+	local my_zone _v4="" _v6=""
+	[ "$zone_bypass" != "0" ] && my_zone=$(get_zone_for_network "$network")
+	if [ -n "$my_zone" ]; then
+		local peer_devs=""
+		for peer_net in $(get_networks_in_zone "$my_zone"); do
+			local peer_dev=$(get_net_device "$peer_net")
+			[ -n "$peer_dev" ] && peer_devs="${peer_devs:+$peer_devs }$peer_dev"
+		done
+		if [ -n "$peer_devs" ]; then
+			local _bp
+			_bp=$(ip -o addr show 2>/dev/null | awk -v devs="$peer_devs" '
+			BEGIN { n = split(devs, d, " "); for (i = 1; i <= n; i++) want[d[i]] = 1 }
+			{
+				if (!($2 in want)) next
+				if ($3 == "inet") print "ip " $4
+				else if ($3 == "inet6" && $0 !~ /scope link/) print "ipv6 " $4
+			}')
+			local proto subnet
+			while read proto subnet; do
+				case "$proto" in
+					ip)   _v4="${_v4:+$_v4 }$subnet" ;;
+					ipv6) _v6="${_v6:+$_v6 }$subnet" ;;
+				esac
+			done <<EOF
+$_bp
+EOF
+		fi
+	fi
+	eqos_update_bypass_set "$network" "$_v4" "$_v6"
+}
+
+# Re-apply per-rule connlimit for all entries currently in IDLIST.
+# Reads fresh fields from UCI so any in-flight config changes are picked up.
+_reapply_conn_for_active_rules() {
+	[ -n "$_uci_cache" ] || _uci_cache=$(uci show "$NAME" 2>/dev/null)
+	local line rule_id _fields addr CI CO TO
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		rule_id="${line%%:*}"
+		[ -n "$rule_id" ] || continue
+		_fields=$(_get_uci_rule_fields "@network_$rule_id")
+		addr="${_fields%%|*}"; _fields="${_fields#*|}"
+		_fields="${_fields#*|}"   # skip dl
+		_fields="${_fields#*|}"   # skip ul
+		CI="${_fields%%|*}"; _fields="${_fields#*|}"
+		CO="${_fields%%|*}"
+		TO="${_fields#*|}"
+		case "$CI" in ''|*[!0-9]*) CI=0 ;; esac
+		case "$CO" in ''|*[!0-9]*) CO=0 ;; esac
+		[ "$CI" -gt 0 ] || [ "$CO" -gt 0 ] || continue
+		# Defensive: strip legacy "<mac>#<ipv4>" encoding from older releases.
+		case "$addr" in *#*) addr="${addr%%#*}" ;; esac
+		# Section may have been deleted from UCI between IDLIST write and
+		# this rebuild — skip silently rather than feed empty addr to nft.
+		[ -n "$addr" ] || { eqos_del_conn "$rule_id"; continue; }
+		# MAC identifiers no longer get conn rules — sweep any leftover and skip.
+		if is_macaddr "$addr"; then
+			eqos_del_conn "$rule_id"
+			continue
+		fi
+		# Re-clear and add per-direction (rule_id used as comment tag).
+		# IP/CIDR rules: addr drives both directions; nft / iptables paths
+		# pick `ip [s|d]addr` vs `ip6 [s|d]addr` from the address family.
+		eqos_del_conn "$rule_id"
+		[ "$CO" -gt 0 ] && eqos_add_conn "$rule_id" "$addr" "$CO" "${TO:-1}" out
+		[ "$CI" -gt 0 ] && eqos_add_conn "$rule_id" "$addr" "$CI" "${TO:-1}" in
+	done < "$IDLIST" 2>/dev/null
+	:  # Normalize exit status — a final-iteration `continue` from the
+	   # "neither CI nor CO > 0" guard would otherwise leak `[`-test rc=1
+	   # to the caller (conn_reload), causing a spurious "failed" logger line.
 }
 
 # Re-add rules for a network that are both enabled AND currently scheduled active.
@@ -616,8 +819,11 @@ EOF
 
 case "$crrun" in
 	"stop")
-		log_msg 2 "=== eqosplus stopping ==="
+		log_msg 2 "=== eqosplus stopping (backend=$EQOS_BACKEND) ==="
 		stop_qos
+		# Tear down the entire connlimit table/chain (covers any rules left
+		# behind by aborted stop_network calls)
+		eqos_teardown_conn_table
 		> "$IDLIST"
 		> "$NETWORKS"
 		> "$LOGFILE"
@@ -626,13 +832,17 @@ case "$crrun" in
 		rm -f /var/$NAME.tmpid.* 2>/dev/null
 		# Clear log on start — config may have changed (e.g. log level)
 		> "$LOGFILE"
-		log_msg 2 "=== eqosplus starting ==="
+		log_msg 2 "=== eqosplus starting (backend=$EQOS_BACKEND) ==="
 		cleanup_orphaned_rules
 		_uci_cache=""  # invalidate after cleanup may have modified UCI
 		_enabled_networks_cache=""
 		> "$IDLIST"
 		> "$NETWORKS"
 		bump_generation
+		# Wipe stale connlimit state from previous runs, then create a fresh table.
+		# init_qosplus -> start_network creates per-network sets/bypass on top of this.
+		eqos_teardown_conn_table
+		eqos_init_conn_table
 		init_qosplus
 	;;
 	"add")
@@ -657,6 +867,25 @@ case "$crrun" in
 		_idlist_batch_remove "$_pending_dels"
 		_batch_mode=""; _pending_dels=""
 		bump_generation
+	;;
+	"conn_reload")
+		# Re-establish the connlimit infrastructure without touching tc.
+		# Triggers:
+		#   - fw3 include hook (when iptables backend's chain gets flushed by
+		#     fw3 reload — see /usr/lib/eqosplus/fw3-include.sh)
+		#   - eqosplusctrl periodic sanity check (when fw4 stop wiped our
+		#     `inet eqosplus` table along with everything else; OpenWrt
+		#     issue #11620)
+		#   - manual recovery
+		# Idempotent: init_conn_table / init_conn_network do nothing if their
+		# state already exists; per-rule re-add does del-then-add, never duplicates.
+		[ "$EQOS_BACKEND" = "none" ] && exit 0
+		log_msg 2 "=== conn_reload (backend=$EQOS_BACKEND) ==="
+		eqos_init_conn_table
+		while IFS= read -r net; do
+			[ -n "$net" ] && _reapply_conn_for_network "$net"
+		done < "$NETWORKS" 2>/dev/null
+		_reapply_conn_for_active_rules
 	;;
 	"resync")
 		[ -n "$crid" ] || exit 1

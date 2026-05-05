@@ -19,7 +19,11 @@ uci_cursor:foreach("firewall", "zone", function(z)
 	end
 end)
 
--- Build hostname lookup from DHCP leases + static leases
+-- Build hostname lookup from DHCP leases + static leases (LuCI's own use).
+-- Note: MAC-based connection limits are NOT supported — the FORWARD chain
+-- can't match L2 destination MAC for inbound traffic, and "outbound only"
+-- semantics would be inconsistent. CBI rejects MAC + conn_in/conn_out > 0
+-- at validate time; the UI also greys-out the inputs when MAC is selected.
 local hostnames = {}
 local lease_file = io.open("/tmp/dhcp.leases", "r")
 if lease_file then
@@ -43,6 +47,11 @@ uci_cursor:foreach("dhcp", "host", function(s)
         if s.ip then hostnames[s.ip] = s.name end
     end
 end)
+
+local function is_mac_string(v)
+	return type(v) == "string"
+		and v:match("^%x%x[:%-]%x%x[:%-]%x%x[:%-]%x%x[:%-]%x%x[:%-]%x%x$") ~= nil
+end
 
 function validate_time(self, value, section)
 	local hh, mm
@@ -141,9 +150,45 @@ for _, net in ipairs(nw:get_networks()) do
 		e.rmempty = false
 		e.size = 4
 
-		ip = t:option(Value, "mac", translate("IP/MAC"))
+		-- Field stores MAC | IPv4 | IPv6 | CIDR. UCI option is "target"; we
+		-- still read legacy "mac" as a fallback so unedited rules from older
+		-- versions keep working without a forced migration step.
+		ip = t:option(Value, "target", translate("IP/MAC"))
 		ip.rmempty = false
 		ip.datatype = "or(macaddr, ipaddr, ip6addr, cidr4, cidr6)"
+		-- Read target first; fall back to legacy "mac" for un-resaved rules.
+		-- Old rules may still carry a "MAC#ipv4" form from a prior release —
+		-- strip everything after the first '#' to recover the bare value.
+		ip.cfgvalue = function(self, section)
+			local raw = self.map:get(section, self.option)
+			if not raw or raw == "" then
+				raw = self.map:get(section, "mac") or ""
+			end
+			return (raw:match("^([^#]+)")) or raw
+		end
+		-- MAC identifiers cannot have connection limits: the FORWARD chain
+		-- can't match L2 destination MAC for inbound traffic (it's rewritten
+		-- by the neigh subsystem AFTER our hook), and "outbound only" would
+		-- be a half-feature that surprises users. The UI greys out conn_in /
+		-- conn_out when MAC is selected; this validate is the defense in
+		-- depth in case the form is bypassed (direct UCI / scripted POST).
+		ip.validate = function(self, value, section)
+			if is_mac_string(value) then
+				local n = function(field)
+					return tonumber(luci.http.formvalue("cbid.eqosplus." .. section .. "." .. field)) or 0
+				end
+				if n("conn_in") > 0 or n("conn_out") > 0 then
+					return nil, translate("MAC identifiers do not support connection limits — pick an IP/CIDR identifier instead, or set both Conn In and Conn Out to 0")
+				end
+			end
+			return value
+		end
+		-- No encoding any more — we just store the bare value. Also clean
+		-- up the legacy "mac" field so "target" becomes the single source.
+		ip.write = function(self, section, value)
+			self.map:del(section, "mac")
+			return Value.write(self, section, value)
+		end
 		if name then
 			-- Collect all device info, keyed by MAC (uppercase)
 			local devices = {}
@@ -209,24 +254,55 @@ for _, net in ipairs(nw:get_networks()) do
 			end
 		end
 
+		-- Shared validator: download / upload / conn_in / conn_out cannot all be 0.
+		-- Reads peer fields from the in-flight form rather than committed UCI.
+		local function validate_capacity(self, value, section)
+			local function n(field)
+				local v = luci.http.formvalue("cbid.eqosplus." .. section .. "." .. field)
+				return tonumber(v) or 0
+			end
+			if n("download") == 0 and n("upload") == 0
+				and n("conn_in") == 0 and n("conn_out") == 0 then
+				return nil, translate("Download, upload, inbound and outbound connection limits cannot all be 0")
+			end
+			return value
+		end
+
 		dl = t:option(Value, "download", translate("Download"))
 		dl.default = '0.1'
 		dl.size = 4
 		dl.datatype = "and(ufloat, max(1250))"
 		dl.rmempty = false
-		dl.validate = function(self, value, section)
-			local peer = luci.http.formvalue("cbid.eqosplus." .. section .. ".upload") or "0"
-			if tonumber(value) == 0 and tonumber(peer) == 0 then
-				return nil, translate("Download and upload cannot both be 0")
-			end
-			return value
-		end
+		dl.validate = validate_capacity
 
 		ul = t:option(Value, "upload", translate("Upload"))
 		ul.default = '0.1'
 		ul.size = 4
 		ul.datatype = "and(ufloat, max(1250))"
 		ul.rmempty = false
+		ul.validate = validate_capacity
+
+		cin = t:option(Value, "conn_in", translate("Conn In"))
+		cin.default = '0'
+		cin.size = 4
+		cin.datatype = "and(uinteger, max(65535))"
+		cin.rmempty = false
+		cin.description = translate("Max inbound connections (0 = no limit). For port-forwarded services / PCDN.")
+		cin.validate = validate_capacity
+
+		cout = t:option(Value, "conn_out", translate("Conn Out"))
+		cout.default = '0'
+		cout.size = 4
+		cout.datatype = "and(uinteger, max(65535))"
+		cout.rmempty = false
+		cout.description = translate("Max outbound connections (0 = no limit). Counts connections initiated by the device.")
+		cout.validate = validate_capacity
+
+		tco = t:option(Flag, "tcp_only", translate("TCP only"))
+		tco.default = "1"
+		tco.rmempty = false
+		tco.size = 4
+		tco.description = translate("When checked, only TCP connections are counted; otherwise all protocols (TCP+UDP+ICMP+...)")
 
 		e = t:option(Value, "timestart", translate("Start"))
 		e.placeholder = '00:00'

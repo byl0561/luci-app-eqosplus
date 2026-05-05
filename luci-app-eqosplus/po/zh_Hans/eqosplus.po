@@ -59,6 +59,33 @@ msgstr "开始时间和结束时间不能相同（00:00 ~ 00:00 表示全天）"
 msgid "Download and upload cannot both be 0"
 msgstr "下载和上传速度不能同时为 0"
 
+msgid "Download, upload, inbound and outbound connection limits cannot all be 0"
+msgstr "下载、上传、入站和出站连接数不能同时为 0"
+
+msgid "Conn In"
+msgstr "入站连接"
+
+msgid "Max inbound connections (0 = no limit). For port-forwarded services / PCDN."
+msgstr "最大入站连接数（0 表示不限制）。适用于端口转发服务、PCDN 等被动接受连接的设备。"
+
+msgid "Conn Out"
+msgstr "出站连接"
+
+msgid "Max outbound connections (0 = no limit). Counts connections initiated by the device."
+msgstr "最大出站连接数（0 表示不限制）。仅统计设备主动发起的连接。"
+
+msgid "TCP only"
+msgstr "仅 TCP"
+
+msgid "When checked, only TCP connections are counted; otherwise all protocols (TCP+UDP+ICMP+...)"
+msgstr "勾选后只统计 TCP 连接；不勾选则统计全部协议（TCP+UDP+ICMP+...）"
+
+msgid "MAC identifiers do not support connection limits — pick an IP/CIDR identifier instead, or set both Conn In and Conn Out to 0"
+msgstr "MAC 标识符不支持限连接数——请改用 IP/CIDR 类型的标识符，或将入站连接和出站连接都设为 0"
+
+msgid "MAC identifiers do not support connection limits"
+msgstr "MAC 标识符不支持限连接数"
+
 msgid "Mon"
 msgstr "一"
 

@@ -1037,4 +1037,196 @@ assert_uq "uci_unquote: special chars" "eqosplus.cfg.mac='AA:BB:CC:DD:EE:FF'" "A
 # Value with brackets (UCI section names)
 assert_uq "uci_unquote: brackets" "eqosplus.@network_lan[0].mac='192.168.1.1'" "192.168.1.1"
 
+echo ""
+echo "-- Connection limit (conn_in / conn_out via core.sh) --"
+
+# Auto-detect a backend (nft preferred) for these tests; skip the section
+# entirely when neither tool is present (e.g. minimal containers used in CI).
+if   command -v nft      >/dev/null 2>&1; then EQOS_BACKEND=nft
+elif command -v iptables >/dev/null 2>&1 && command -v ipset >/dev/null 2>&1; then EQOS_BACKEND=iptables
+else EQOS_BACKEND=none; fi
+export EQOS_BACKEND
+echo "Backend under test: $EQOS_BACKEND"
+
+if [ "$EQOS_BACKEND" = "none" ]; then
+	echo "(skipped: neither nft nor iptables+ipset available)"
+else
+	# Probes used to assert backend state without rebuilding regex per test
+	conn_has_rule_id() {
+		# Returns 0 if at least one rule with comment "eqos:rule:<rule_id>" exists.
+		case "$EQOS_BACKEND" in
+			nft)
+				nft list chain inet eqosplus forward 2>/dev/null \
+					| grep -qF "\"eqos:rule:$1\""
+				;;
+			iptables)
+				{ iptables  -L eqos_forward -n 2>/dev/null
+				  ip6tables -L eqos_forward -n 2>/dev/null; } \
+					| grep -qF "/* eqos:rule:$1 */"
+				;;
+		esac
+	}
+	conn_has_bypass_for() {
+		case "$EQOS_BACKEND" in
+			nft)
+				nft list chain inet eqosplus forward 2>/dev/null \
+					| grep -qF "\"eqos:bypass:$1:\""
+				;;
+			iptables)
+				{ iptables  -L eqos_forward -n 2>/dev/null
+				  ip6tables -L eqos_forward -n 2>/dev/null; } \
+					| grep -qF "/* eqos:bypass:$1: */"
+				;;
+		esac
+	}
+
+	# Sweep any leftover test state from a prior crashed test run.
+	# Must NOT flush the whole table — production rules (lan/guest/...) live
+	# alongside us in the same table while this script runs.
+	for _net in eqotest_a eqotest_b; do
+		eqos_teardown_conn_network "$_net" 2>/dev/null
+	done
+
+	# Table / chain init (idempotent — production may already have it up)
+	eqos_init_conn_table
+	if [ "$EQOS_BACKEND" = "nft" ]; then
+		assert "conn: nft table 'inet eqosplus' exists" \
+			nft list table inet eqosplus
+	else
+		assert "conn: iptables eqos_forward chain exists" \
+			iptables -nL eqos_forward
+		assert "conn: ip6tables eqos_forward chain exists" \
+			ip6tables -nL eqos_forward
+	fi
+
+	# Per-network bypass init (use synthetic network name "eqotest_a")
+	eqos_init_conn_network "eqotest_a" "lo"
+	assert "conn: bypass entry for network eqotest_a present" \
+		conn_has_bypass_for "eqotest_a"
+
+	# Bypass-set update with mixed v4 + v6 subnets — must succeed and not
+	# leak partial state from prior calls
+	eqos_update_bypass_set "eqotest_a" "10.66.66.0/24 10.77.77.0/24" "fd66::/64"
+	if [ "$EQOS_BACKEND" = "nft" ]; then
+		PATTERN="10.66.66.0/24"
+		assert "conn: bypass set populated (v4)" \
+			nft list set inet eqosplus bypass4_eqotest_a
+		PATTERN="fd66::/64"
+		assert "conn: bypass set populated (v6)" \
+			nft list set inet eqosplus bypass6_eqotest_a
+	else
+		assert "conn: bypass ipset populated (v4)" \
+			ipset test eqos_bypass4_eqotest_a 10.66.66.0/24
+		assert "conn: bypass ipset populated (v6)" \
+			ipset test eqos_bypass6_eqotest_a fd66::/64
+	fi
+
+	# IP outbound rule
+	eqos_add_conn "eqotest_a[0]" "172.31.255.50" "100" "1" out
+	assert "conn: IP+out rule installed" conn_has_rule_id "eqotest_a[0]"
+
+	# IP inbound rule (different rule_id)
+	eqos_add_conn "eqotest_a[1]" "172.31.255.51" "200" "1" in
+	assert "conn: IP+in rule installed" conn_has_rule_id "eqotest_a[1]"
+
+	# Both directions on same rule_id share the comment
+	eqos_add_conn "eqotest_a[2]" "172.31.255.52" "50" "0" out
+	eqos_add_conn "eqotest_a[2]" "172.31.255.52" "50" "0" in
+	assert "conn: rule with both directions present" conn_has_rule_id "eqotest_a[2]"
+
+	# MAC + connection limit policy is enforced at THREE layers:
+	#   1. UI (index.htm JS)   — conn_in/out inputs forced to "0" + readOnly
+	#                             when target dropdown is a MAC literal.
+	#   2. CBI validate (Lua)  — rejects form on save when MAC + non-zero conn.
+	#   3. add_mac wrapper     — never calls eqos_add_conn for MAC; sweeps
+	#                             leftover via eqos_del_conn on every add.
+	# The eqos_add_conn primitive itself is layer-agnostic: it still accepts
+	# MAC+out (since L2 source DOES match in FORWARD), and rejects MAC+in
+	# (since L2 dest is rewritten by neigh subsystem AFTER the hook).
+	# These two assertions verify the primitive's behavior — they do NOT
+	# test the user-facing policy (the upper layers prevent us reaching here).
+	eqos_add_conn "eqotest_a[3]" "02:00:00:00:55:01" "30" "1" out
+	assert "conn: primitive accepts MAC+out (defense-in-depth fallback)" \
+		conn_has_rule_id "eqotest_a[3]"
+	assert_fail "conn: primitive rejects MAC+in (FORWARD-time L2 daddr unmatchable)" \
+		eqos_add_conn "eqotest_a[4]" "02:00:00:00:55:02" "10" "1" in
+
+	# Empty address must return non-zero (not silently install garbage). This
+	# guards _reapply_conn_for_active_rules' empty-addr skip path.
+	assert_fail "conn: primitive rejects empty addr" \
+		eqos_add_conn "eqotest_a[empty]" "" "10" "1" out
+	assert_fail "conn: empty-addr did not leak a rule" \
+		conn_has_rule_id "eqotest_a[empty]"
+
+	# Zero / negative limit must also reject — defense against caller-side
+	# arithmetic bugs feeding through to nft / iptables.
+	assert_fail "conn: primitive rejects limit=0" \
+		eqos_add_conn "eqotest_a[zero]" "172.31.255.99" "0" "1" out
+	assert_fail "conn: primitive rejects non-numeric limit" \
+		eqos_add_conn "eqotest_a[junk]" "172.31.255.99" "abc" "1" out
+
+	# CIDR outbound — both backends should accept; for iptables verify the
+	# --connlimit-mask reflects the CIDR prefix (not hardcoded /32).
+	eqos_add_conn "eqotest_a[5]" "172.31.250.0/24" "500" "0" out
+	assert "conn: CIDR rule installed" conn_has_rule_id "eqotest_a[5]"
+	if [ "$EQOS_BACKEND" = "iptables" ]; then
+		check_mask24() {
+			iptables -L eqos_forward -nv 2>/dev/null | grep -qE 'mask 24'
+		}
+		assert "conn: iptables CIDR /24 -> --connlimit-mask 24" check_mask24
+	fi
+
+	# Exact-match deletion (anchored by closing quote / "*/" markers): rule_id
+	# "eqotest_a[0]" must not be confused with "eqotest_a[00]" or "eqotest_a[0]extra".
+	eqos_add_conn "eqotest_a[0]extra" "172.31.255.60" "100" "1" out 2>/dev/null
+	# (rule_id_str like "eqotest_a[0]extra" is unusual but the comment-match
+	# must still distinguish it from "eqotest_a[0]")
+	eqos_del_conn "eqotest_a[0]"
+	assert_fail "conn: del exact 'eqotest_a[0]' removed" conn_has_rule_id "eqotest_a[0]"
+	# The "extra" rule, if backend accepted it, must survive — proves no
+	# substring collision between eqotest_a[0] and eqotest_a[0]extra
+	if conn_has_rule_id "eqotest_a[0]extra"; then
+		eqos_del_conn "eqotest_a[0]extra"
+	fi
+
+	# Per-network sweep: install a rule for a similarly-named network, ensure
+	# purging "eqotest_a" doesn't touch "eqotest_b".
+	eqos_init_conn_network "eqotest_b" "lo"
+	eqos_add_conn "eqotest_b[0]" "172.31.244.10" "10" "1" out
+
+	# Sanity: both networks have at least one rule before purge
+	check_eqotest_a_present()  { conn_has_rule_id "eqotest_a[1]"; }
+	check_eqotest_b_present() { conn_has_rule_id "eqotest_b[0]"; }
+	assert "conn: eqotest_a[1] present pre-purge"  check_eqotest_a_present
+	assert "conn: eqotest_b[0] present pre-purge" check_eqotest_b_present
+
+	# Purge "eqotest_a" only — "eqotest_b" must remain intact (prefix-match
+	# anchored by '[' delimiter prevents the lan/lan2 collision pattern)
+	eqos_purge_conn_for_network "eqotest_a"
+	assert_fail "conn: eqotest_a[1] removed by purge" conn_has_rule_id "eqotest_a[1]"
+	assert_fail "conn: eqotest_a[2] removed by purge" conn_has_rule_id "eqotest_a[2]"
+	assert_fail "conn: eqotest_a[3] removed by purge" conn_has_rule_id "eqotest_a[3]"
+	assert_fail "conn: eqotest_a[5] removed by purge" conn_has_rule_id "eqotest_a[5]"
+	assert "conn: eqotest_b[0] survives purge of eqotest_a" \
+		conn_has_rule_id "eqotest_b[0]"
+
+	# Bypass-similar-name collision: bypass for "eqotest_a" must not be deleted
+	# when tearing down "eqotest_b"
+	eqos_teardown_conn_network "eqotest_b"
+	assert "conn: eqotest_a bypass survives eqotest_b teardown" \
+		conn_has_bypass_for "eqotest_a"
+	assert_fail "conn: eqotest_b[0] gone after teardown" conn_has_rule_id "eqotest_b[0]"
+	assert_fail "conn: eqotest_b bypass gone" conn_has_bypass_for "eqotest_b"
+
+	# Final cleanup: only nuke OUR test networks. Production conn_limit rules
+	# (real "lan", "guest", etc.) share the same table and must survive.
+	for _net in eqotest_a eqotest_b; do
+		eqos_teardown_conn_network "$_net" 2>/dev/null
+	done
+	assert_fail "conn: eqotest_a residue cleared after per-network teardown" \
+		conn_has_bypass_for "eqotest_a"
+	assert_fail "conn: eqotest_b residue cleared after per-network teardown" \
+		conn_has_bypass_for "eqotest_b"
+fi
+
 test_report

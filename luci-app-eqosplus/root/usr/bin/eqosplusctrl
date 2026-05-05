@@ -54,6 +54,41 @@ idlistusr(){
 	# empties this file).  Prevents futile add/del attempts on torn-down tc.
 	[ -s "/var/$NAME.networks" ] || return
 
+	# Sanity-check connlimit firewall state. Cheap probe runs every poll;
+	# conn_reload only fires when something is actually missing.
+	#
+	# Recovery scenarios:
+	#   - fw4 stop  → flushes ALL nft tables incl. `inet eqosplus`
+	#                 (OpenWrt issue #11620; fw4 has NO hotplug events).
+	#   - fw3 stop  → flushes FORWARD; our jump from FORWARD → eqos_forward
+	#                 disappears even if the chain itself survives.
+	#   - fw3 reload without our include firing (rare race / install glitch).
+	#   - someone manually deleted the chain or jump.
+	#
+	# We probe what's actually installed on the system (not the UCI-pinned
+	# backend) — a toolchain switch doesn't loop us into spurious reloads.
+	# Total cost: 1–4 forks (~5–20ms) per 30s cycle, ~0.07% CPU worst case.
+	local _state_intact=1
+	if   command -v nft      >/dev/null 2>&1; then
+		# nft path: independent table with its own hook registration; if the
+		# table is present, the chain is hooked and rules fire.
+		nft list table inet eqosplus >/dev/null 2>&1 || _state_intact=0
+	elif command -v iptables >/dev/null 2>&1; then
+		# iptables path: BOTH v4/v6 chains must exist AND BOTH FORWARD jumps
+		# must be present for traffic to reach our REJECT rules. v4 and v6
+		# can be wiped independently (e.g. ip6tables-restore failure that
+		# left v4 alone), so each is probed separately.
+		iptables  -nL eqos_forward                  >/dev/null 2>&1 || _state_intact=0
+		ip6tables -nL eqos_forward                  >/dev/null 2>&1 || _state_intact=0
+		iptables  -C FORWARD -j eqos_forward        2>/dev/null     || _state_intact=0
+		ip6tables -C FORWARD -j eqos_forward        2>/dev/null     || _state_intact=0
+	fi
+	if [ "$_state_intact" = "0" ]; then
+		logger -t eqosplusctrl "conn state missing, triggering conn_reload"
+		$EQOS_TIMEOUT 30 eqosplus conn_reload >/dev/null 2>&1 \
+			|| logger -t eqosplusctrl "conn_reload failed; will retry next cycle"
+	fi
+
 	[ -s "$IDLIST" ] || touch "$IDLIST"
 
 	# Reload cache if config file changed (stat for mtime; md5sum fallback

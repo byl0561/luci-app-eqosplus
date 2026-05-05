@@ -562,28 +562,22 @@ eqos_purge_conn_for_network_ipt() {
 	_eqos_ipt_purge_by_prefix "eqos:rule:${network}["
 }
 
-# Delete rules whose comment EXACTLY equals $1 (right-edge anchored).
-# iptables -L renders --comment differently across builds: "/* x */", bare "x",
-# or "x" with surrounding whitespace. Rather than depend on any single wrapper,
-# we substring-match the comment text and verify the next character is a
-# comment-boundary marker: space, tab, '*' (start of "*/"), '"' (closing quote
-# from rare quoted forms), or end-of-line. This rejects "eqos:rule:lan[0]" from
-# matching "eqos:rule:lan[0]extra" — the boundary char would be 'e', not a
-# delimiter. (Tested by eqosplus_test's eqotest_a[0]extra collision case.)
+# Delete rules whose comment EXACTLY equals $1.
+# We use iptables-save (stable, machine-readable output) instead of iptables -L
+# because -L's rendering of -m comment varies across builds: some show
+# "/* x */", some bare, some omit it entirely without -v. iptables-save always
+# emits "--comment "x"" (double-quoted, no wrapper) per rule, one rule per line
+# starting with "-A <chain>", so we can count chain index reliably.
 _eqos_ipt_delete_by_comment() {
 	local comment=$1
 	[ -n "$comment" ] || return
-	local cmd lns ln
+	local cmd save_cmd lns ln
 	for cmd in iptables ip6tables; do
-		lns=$($cmd -L eqos_forward --line-numbers -n 2>/dev/null | awk -v c="$comment" '
-			$1 ~ /^[0-9]+$/ {
-				pos = index($0, c)
-				if (pos > 0) {
-					nxt = substr($0, pos + length(c), 1)
-					if (nxt == "" || nxt == " " || nxt == "\t" || nxt == "*" || nxt == "\"") {
-						print $1
-					}
-				}
+		save_cmd="${cmd}-save"
+		lns=$($save_cmd 2>/dev/null | awk -v c="$comment" '
+			/^-A eqos_forward / {
+				idx++
+				if (index($0, "--comment \"" c "\"")) print idx
 			}
 		' | sort -rn)
 		for ln in $lns; do
@@ -593,19 +587,21 @@ _eqos_ipt_delete_by_comment() {
 	return 0
 }
 
-# Delete rules whose comment STARTS WITH $1 (substring match, no right anchor).
+# Delete rules whose comment STARTS WITH $1 (prefix substring within --comment).
 # Caller must include a trailing delimiter in $1 ('[' for per-rule, ':' for
 # bypass) so e.g. "eqos:rule:lan[" won't collide with "eqos:rule:lan2[" — the
-# differentiating character is what makes substring match safe here. The format
-# wrapper from iptables (-L's "/* x */" vs bare) doesn't matter for prefix
-# match because we anchor on iptables's own line-start (a numeric line index).
+# differentiating character anchors the prefix match.
 _eqos_ipt_purge_by_prefix() {
 	local prefix=$1
 	[ -n "$prefix" ] || return
-	local cmd lns ln
+	local cmd save_cmd lns ln
 	for cmd in iptables ip6tables; do
-		lns=$($cmd -L eqos_forward --line-numbers -n 2>/dev/null | awk -v p="$prefix" '
-			index($0, p) && $1 ~ /^[0-9]+$/ { print $1 }
+		save_cmd="${cmd}-save"
+		lns=$($save_cmd 2>/dev/null | awk -v p="$prefix" '
+			/^-A eqos_forward / {
+				idx++
+				if (index($0, "--comment \"" p)) print idx
+			}
 		' | sort -rn)
 		for ln in $lns; do
 			$cmd -D eqos_forward "$ln" 2>/dev/null

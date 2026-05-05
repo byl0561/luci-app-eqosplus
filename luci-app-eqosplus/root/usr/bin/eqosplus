@@ -416,8 +416,13 @@ sync_networks() {
 	tmp_run=$(safe_mktemp) || { rm -f "$tmp_all"; return 1; }
 	echo "$all_networks" > "$tmp_all"
 	echo "$running_networks" > "$tmp_run"
-	need_start=$(grep -Fxvf "$tmp_run" "$tmp_all")
-	need_stop=$(grep -Fxvf "$tmp_all" "$tmp_run")
+	# awk-based set diff — busybox `grep -Fxvf` returns empty when the pattern
+	# file is empty (vs GNU which returns the data file as-is), which silently
+	# breaks first-boot start (running_networks empty → need_start empty → no
+	# networks come up). Skip blank lines on both sides for robustness against
+	# echo's trailing newline on empty inputs.
+	need_start=$(awk 'NR==FNR{if($0!="")b[$0]=1;next} $0!="" && !($0 in b)' "$tmp_run" "$tmp_all")
+	need_stop=$(awk 'NR==FNR{if($0!="")b[$0]=1;next} $0!="" && !($0 in b)' "$tmp_all" "$tmp_run")
 	rm -f "$tmp_all" "$tmp_run"
 
 	while IFS= read -r item; do

@@ -749,7 +749,14 @@ assert_fail "sched: cross-midnight workdays Sat 23:00 (Sat not in workdays)" \
 	check_item "test" "23:00" "06:00" "1,2,3,4,5" "23" "00" "6"
 
 echo ""
-echo "-- Set difference (grep -Fxvf, used by sync_networks) --"
+echo "-- Set difference (awk-based, used by sync_networks) --"
+
+# Mirror the production helper from eqosplus::sync_networks. Tests the awk
+# diff (not `grep -Fxvf`) because busybox grep returns empty when the pattern
+# file is empty, breaking first-boot start.
+_setdiff() {
+	awk 'NR==FNR{if($0!="")b[$0]=1;next} $0!="" && !($0 in b)' "$1" "$2"
+}
 
 _test_setdiff_dir=$(mktemp -d "/tmp/eqosplus_test_setdiff.XXXXXX")
 _sd_a="$_test_setdiff_dir/a"
@@ -759,35 +766,35 @@ _sd_out="$_test_setdiff_dir/out"
 # A-B: items in A but not in B (networks to start)
 printf 'lan\nguest\nwan\n' > "$_sd_a"
 printf 'lan\n' > "$_sd_b"
-grep -Fxvf "$_sd_b" "$_sd_a" > "$_sd_out"
+_setdiff "$_sd_b" "$_sd_a" > "$_sd_out"
 assert_file_content "setdiff: A-B basic" "$(printf 'guest\nwan')" "$_sd_out"
 
 # B-A: B is subset of A (nothing to stop)
-grep -Fxvf "$_sd_a" "$_sd_b" > "$_sd_out" || true
+_setdiff "$_sd_a" "$_sd_b" > "$_sd_out"
 assert_file_content "setdiff: B-A when B subset of A" "" "$_sd_out"
 
 # Identical sets (no diff)
 printf 'lan\nguest\n' > "$_sd_a"
 printf 'guest\nlan\n' > "$_sd_b"
-grep -Fxvf "$_sd_b" "$_sd_a" > "$_sd_out" || true
+_setdiff "$_sd_b" "$_sd_a" > "$_sd_out"
 assert_file_content "setdiff: identical sets" "" "$_sd_out"
 
-# B empty (all of A returned)
+# B empty (all of A returned) — first-boot regression case
 printf 'lan\nguest\n' > "$_sd_a"
 > "$_sd_b"
-grep -Fxvf "$_sd_b" "$_sd_a" > "$_sd_out"
+_setdiff "$_sd_b" "$_sd_a" > "$_sd_out"
 assert_file_content "setdiff: B empty, all in A" "$(printf 'lan\nguest')" "$_sd_out"
 
 # A empty (nothing returned)
 > "$_sd_a"
 printf 'lan\n' > "$_sd_b"
-grep -Fxvf "$_sd_b" "$_sd_a" > "$_sd_out" || true
+_setdiff "$_sd_b" "$_sd_a" > "$_sd_out"
 assert_file_content "setdiff: A empty" "" "$_sd_out"
 
 # Both empty
 > "$_sd_a"
 > "$_sd_b"
-grep -Fxvf "$_sd_b" "$_sd_a" > "$_sd_out" || true
+_setdiff "$_sd_b" "$_sd_a" > "$_sd_out"
 assert_file_content "setdiff: both empty" "" "$_sd_out"
 
 rm -rf "$_test_setdiff_dir"
@@ -1060,24 +1067,14 @@ else
 					| grep -qF "\"eqos:rule:$1\""
 				;;
 			iptables)
-				# Right-edge-anchored substring match — same strategy as the
-				# production _eqos_ipt_delete_by_comment helper. Tolerates the
-				# /* x */, "x", and bare-x output variants while still rejecting
-				# "eqos:rule:lan[0]" from matching "eqos:rule:lan[0]extra".
-				{ iptables  -L eqos_forward -n 2>/dev/null
-				  ip6tables -L eqos_forward -n 2>/dev/null; } \
-					| awk -v c="eqos:rule:$1" '
-						{
-							pos = index($0, c)
-							if (pos > 0) {
-								nxt = substr($0, pos + length(c), 1)
-								if (nxt == "" || nxt == " " || nxt == "\t" || nxt == "*" || nxt == "\"") {
-									found = 1; exit
-								}
-							}
-						}
-						END { exit (found ? 0 : 1) }
-					'
+				# iptables-save matches the production _eqos_ipt_delete_by_comment
+				# strategy: stable "--comment "x"" rendering, immune to -L format
+				# variation. Exact-match (with closing ") prevents "[0]" from
+				# colliding with "[0]extra".
+				{ iptables-save  2>/dev/null
+				  ip6tables-save 2>/dev/null; } \
+					| grep -F '-A eqos_forward' \
+					| grep -qF "--comment \"eqos:rule:$1\""
 				;;
 		esac
 	}
@@ -1088,22 +1085,10 @@ else
 					| grep -qF "\"eqos:bypass:$1:\""
 				;;
 			iptables)
-				# Same multi-format-tolerant boundary check; trailing ':' in
-				# the comment anchors against "eqos:bypass:lan2:" collision.
-				{ iptables  -L eqos_forward -n 2>/dev/null
-				  ip6tables -L eqos_forward -n 2>/dev/null; } \
-					| awk -v c="eqos:bypass:$1:" '
-						{
-							pos = index($0, c)
-							if (pos > 0) {
-								nxt = substr($0, pos + length(c), 1)
-								if (nxt == "" || nxt == " " || nxt == "\t" || nxt == "*" || nxt == "\"") {
-									found = 1; exit
-								}
-							}
-						}
-						END { exit (found ? 0 : 1) }
-					'
+				{ iptables-save  2>/dev/null
+				  ip6tables-save 2>/dev/null; } \
+					| grep -F '-A eqos_forward' \
+					| grep -qF "--comment \"eqos:bypass:$1:\""
 				;;
 		esac
 	}
@@ -1198,8 +1183,11 @@ else
 	eqos_add_conn "eqotest_a[5]" "172.31.250.0/24" "500" "0" out
 	assert "conn: CIDR rule installed" conn_has_rule_id "eqotest_a[5]"
 	if [ "$EQOS_BACKEND" = "iptables" ]; then
+		# iptables-save preserves raw "--connlimit-mask 24"; -L -nv renders the
+		# connlimit module differently across builds ("mask 24" / "#conn src/24"
+		# / sometimes not at all), so save-format is the reliable probe.
 		check_mask24() {
-			iptables -L eqos_forward -nv 2>/dev/null | grep -qE 'mask 24'
+			iptables-save 2>/dev/null | grep -F 'eqos_forward' | grep -qF 'connlimit-mask 24'
 		}
 		assert "conn: iptables CIDR /24 -> --connlimit-mask 24" check_mask24
 	fi

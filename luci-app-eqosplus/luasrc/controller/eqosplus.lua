@@ -132,14 +132,48 @@ function act_install_deps()
     luci.http.write_json({success = all_ok, output = output})
 end
 
-function act_run_test()
+-- Async test runner: traffic test can take 60-90s with the new conn_limit
+-- sections, but uhttpd's default `script_timeout=60` cuts the response off
+-- mid-flight (sys.exec returns empty → user sees "No output").
+-- Pattern: backend POSTs ?action=start to fire the test in the background;
+-- frontend polls the same endpoint repeatedly to fetch progress + output.
+-- Each call returns instantly so uhttpd never times out, regardless of how
+-- long the test runs.
+local function _async_test(name, script, max_secs)
     local sys = require "luci.sys"
+    local nixio = require "nixio"
+    local LOG = "/tmp/eqosplus_" .. name .. ".log"
+    local PID = "/tmp/eqosplus_" .. name .. ".pid"
+
+    local function is_running()
+        if not nixio.fs.access(PID) then return false end
+        local pid = (sys.exec("cat " .. PID) or ""):match("(%d+)")
+        if not pid then return false end
+        return sys.call("kill -0 " .. pid .. " 2>/dev/null") == 0
+    end
+
+    local action = luci.http.formvalue("action") or ""
+    local running = is_running()
+
+    if action == "start" and not running then
+        -- Truncate log, fire test detached, record pid for status checks.
+        -- timeout_exec is still useful as a hard ceiling on runaway tests.
+        sys.exec(": > " .. LOG)
+        sys.exec("(" .. TIMEOUT .. " " .. tostring(max_secs) .. " "
+            .. script .. " 2>&1; rm -f " .. PID .. ") > " .. LOG
+            .. " 2>&1 < /dev/null & echo $! > " .. PID)
+        running = true
+    end
+
+    local output = sys.exec("cat " .. LOG .. " 2>/dev/null") or ""
     luci.http.prepare_content("application/json")
-    luci.http.write_json({output = sys.exec(TIMEOUT .. " 120 eqosplus_test 2>&1")})
+    luci.http.write_json({running = running, output = output})
+end
+
+function act_run_test()
+    _async_test("test", "eqosplus_test", 180)
 end
 
 function act_run_traffic_test()
-    local sys = require "luci.sys"
-    luci.http.prepare_content("application/json")
-    luci.http.write_json({output = sys.exec(TIMEOUT .. " 120 eqosplus_traffic_test 2>&1")})
+    _async_test("traffic_test", "eqosplus_traffic_test", 300)
 end

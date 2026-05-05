@@ -460,27 +460,37 @@
 		}
 
 		function findConnInputs(row) {
+			// Numeric inputs (conn_in / conn_out) — text type, readOnly works.
 			return [
 				row.querySelector('input[name$=".conn_in"]'),
 				row.querySelector('input[name$=".conn_out"]')
 			].filter(Boolean);
 		}
+		function findTcpOnlyInput(row) {
+			// LuCI Flag → <input type="checkbox">. readOnly is ignored on
+			// checkboxes by the browser, so we use pointer-events + tabIndex
+			// to lock interaction. Form submission of value=1 is preserved
+			// (we force checked=true when MAC is selected), so the saved
+			// state is always the default.
+			return row.querySelector('input[type="checkbox"][name$=".tcp_only"]');
+		}
 
 		function syncRow(row) {
-			var inputs = findConnInputs(row);
-			if (!inputs.length) return;
+			var connInputs = findConnInputs(row);
+			var tcpOnly = findTcpOnlyInput(row);
+			if (!connInputs.length && !tcpOnly) return;
 			var isMac = MAC_RE.test(readTargetValue(row));
-			inputs.forEach(function(inp) {
+			var msg = '<%=translate("MAC identifiers do not support connection limits")%>';
+
+			// Numeric conn inputs — readOnly + force "0" to clear stale UCI values.
+			// Disabled inputs are EXCLUDED from form submission per HTML spec,
+			// so write hook would never receive "0" and old CI/CO values would
+			// silently survive. readOnly keeps them submitted.
+			connInputs.forEach(function(inp) {
 				if (isMac) {
 					if (inp.value !== '0') inp.value = '0';
-					// readOnly (not disabled) — disabled inputs are EXCLUDED
-					// from form submission per HTML spec, so the server-side
-					// write hook would never receive "0" and stale UCI values
-					// (e.g. CI=100 from before the user picked MAC) would
-					// silently survive in the config file. readOnly keeps the
-					// input submitted while still preventing user typing.
 					inp.readOnly = true;
-					inp.title = '<%=translate("MAC identifiers do not support connection limits")%>';
+					inp.title = msg;
 					inp.style.opacity = '0.5';
 					inp.style.cursor = 'not-allowed';
 					inp.style.background = '#f0f0f0';
@@ -492,6 +502,34 @@
 					inp.style.background = '';
 				}
 			});
+
+			// tcp_only checkbox — force to default ("1" = checked) and lock.
+			// Why not `disabled`: HTML excludes disabled inputs from form
+			// submission, but LuCI Flag emits a hidden fallback `<input
+			// type="hidden" value="0">` alongside the checkbox. With the
+			// checkbox disabled, only the hidden submits → UCI ends up
+			// with tcp_only=0 every time the user saves a MAC row, even
+			// though it's "irrelevant" for MAC. That dirties the data.
+			// pointer-events:none + force checked=true gives:
+			//   - checkbox visually checked + greyed
+			//   - checkbox value=1 still submits (wins over hidden value=0)
+			//   - UCI gets tcp_only=1 (matches default), consistent state
+			if (tcpOnly) {
+				if (isMac) {
+					if (!tcpOnly.checked) tcpOnly.checked = true;  // lock to default
+					tcpOnly.style.pointerEvents = 'none';
+					tcpOnly.style.opacity = '0.5';
+					tcpOnly.style.cursor = 'not-allowed';
+					tcpOnly.title = msg;
+					tcpOnly.tabIndex = -1;
+				} else {
+					tcpOnly.style.pointerEvents = '';
+					tcpOnly.style.opacity = '';
+					tcpOnly.style.cursor = '';
+					tcpOnly.title = '';
+					tcpOnly.tabIndex = 0;
+				}
+			}
 		}
 
 		function syncAll() {
@@ -706,10 +744,32 @@
 	}
 
 	function doRunTest(btn, out, origLabel, testUrl) {
+		// Async pattern: start the test, then poll every 1s for progress.
+		// The backend writes test output to a tmp log; each poll returns the
+		// log so far + a "running" flag. uhttpd never sees a long request,
+		// so script_timeout (default 60s) doesn't cut us off mid-test.
 		btn.value = '<%=translate("Running...")%>';
 		out.value = '<%=translate("Running tests, please wait...")%>';
-		XHR.get(testUrl, null, function(x, r) {
-			_testDone(btn, out, origLabel, r);
+		var pollFn = null;
+		var firstResp = true;
+		pollFn = function(x, r) {
+			if (r) {
+				// Show streaming output as it's produced (autoscroll to end).
+				if (r.output != null) {
+					out.value = r.output;
+					out.scrollTop = out.scrollHeight;
+				}
+				if (!r.running && !firstResp) {
+					if (pollFn) XHR.stop(pollFn);
+					_testDone(btn, out, origLabel, r);
+				}
+				firstResp = false;
+			}
+		};
+		// Kick off the test (action=start), then start polling.
+		XHR.get(testUrl + '?action=start', null, function(x, r) {
+			pollFn(x, r);
+			XHR.poll(1, testUrl, null, pollFn);
 		});
 	}
 

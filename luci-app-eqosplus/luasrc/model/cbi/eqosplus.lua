@@ -269,14 +269,14 @@ for _, net in ipairs(nw:get_networks()) do
 		end
 
 		dl = t:option(Value, "download", translate("Download"))
-		dl.default = '0.1'
+		dl.default = '0'
 		dl.size = 4
 		dl.datatype = "and(ufloat, max(1250))"
 		dl.rmempty = false
 		dl.validate = validate_capacity
 
 		ul = t:option(Value, "upload", translate("Upload"))
-		ul.default = '0.1'
+		ul.default = '0'
 		ul.size = 4
 		ul.datatype = "and(ufloat, max(1250))"
 		ul.rmempty = false
@@ -287,7 +287,6 @@ for _, net in ipairs(nw:get_networks()) do
 		cin.size = 4
 		cin.datatype = "and(uinteger, max(65535))"
 		cin.rmempty = false
-		cin.description = translate("Max inbound connections (0 = no limit). For port-forwarded services / PCDN.")
 		cin.validate = validate_capacity
 
 		cout = t:option(Value, "conn_out", translate("Conn Out"))
@@ -295,14 +294,12 @@ for _, net in ipairs(nw:get_networks()) do
 		cout.size = 4
 		cout.datatype = "and(uinteger, max(65535))"
 		cout.rmempty = false
-		cout.description = translate("Max outbound connections (0 = no limit). Counts connections initiated by the device.")
 		cout.validate = validate_capacity
 
 		tco = t:option(Flag, "tcp_only", translate("TCP only"))
 		tco.default = "1"
 		tco.rmempty = false
 		tco.size = 4
-		tco.description = translate("When checked, only TCP connections are counted; otherwise all protocols (TCP+UDP+ICMP+...)")
 
 		e = t:option(Value, "timestart", translate("Start"))
 		e.placeholder = '00:00'

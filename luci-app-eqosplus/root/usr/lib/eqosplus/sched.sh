@@ -27,9 +27,20 @@ check_item() {
 		case "$start_m" in ''|*[!0-9]*) return 1 ;; esac
 		case "$end_h"   in ''|*[!0-9]*) return 1 ;; esac
 		case "$end_m"   in ''|*[!0-9]*) return 1 ;; esac
-		start_seconds=$((${start_h#0} * 3600 + ${start_m#0} * 60))
-		end_seconds=$((${end_h#0} * 3600 + ${end_m#0} * 60))
-		current_time=$((${cur_h#0} * 3600 + ${cur_m#0} * 60))
+		# Strip single leading 0 to avoid octal interpretation (`08` → arith
+		# error in busybox ash). For lone-"0" inputs the strip leaves an
+		# empty string, which itself errors `$(("" * N))` and on some
+		# busybox builds aborts the whole script — defaulting back to "0"
+		# via :- keeps the arithmetic well-formed for "0:00" / "0:30" etc.
+		_sh=${start_h#0}; _sh=${_sh:-0}
+		_sm=${start_m#0}; _sm=${_sm:-0}
+		_eh=${end_h#0};   _eh=${_eh:-0}
+		_em=${end_m#0};   _em=${_em:-0}
+		_ch=${cur_h#0};   _ch=${_ch:-0}
+		_cm=${cur_m#0};   _cm=${_cm:-0}
+		start_seconds=$((_sh * 3600 + _sm * 60))
+		end_seconds=$((_eh * 3600 + _em * 60))
+		current_time=$((_ch * 3600 + _cm * 60))
 
 		# Zero-width time window (e.g. 09:00-09:00): treat as inactive.
 		# UI validation prevents this (start==end disallowed unless 00:00==00:00).

@@ -1069,12 +1069,13 @@ else
 			iptables)
 				# iptables-save matches the production _eqos_ipt_delete_by_comment
 				# strategy: stable "--comment "x"" rendering, immune to -L format
-				# variation. Exact-match (with closing ") prevents "[0]" from
-				# colliding with "[0]extra".
+				# variation. The `-- pattern` form is required because busybox
+				# grep parses leading `-A`/`--comment` as options otherwise
+				# (`-A N` for after-context, `--comment` as unknown long opt).
 				{ iptables-save  2>/dev/null
 				  ip6tables-save 2>/dev/null; } \
-					| grep -F '-A eqos_forward' \
-					| grep -qF "--comment \"eqos:rule:$1\""
+					| grep -F -- '-A eqos_forward' \
+					| grep -qF -- "--comment \"eqos:rule:$1\""
 				;;
 		esac
 	}
@@ -1087,8 +1088,8 @@ else
 			iptables)
 				{ iptables-save  2>/dev/null
 				  ip6tables-save 2>/dev/null; } \
-					| grep -F '-A eqos_forward' \
-					| grep -qF "--comment \"eqos:bypass:$1:\""
+					| grep -F -- '-A eqos_forward' \
+					| grep -qF -- "--comment \"eqos:bypass:$1:\""
 				;;
 		esac
 	}

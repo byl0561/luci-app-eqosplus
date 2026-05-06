@@ -166,11 +166,23 @@ echo "-- Connection limit (real TCP via FORWARD chain) --"
 # packet counter for a specific eqos:rule:<id> rule from iptables-save -c.
 # Defined here at outer scope so it survives "skipped" branches of either
 # section's setup block.
+
+# iptables-save -c output line: [PKTS:BYTES] -A <chain> ... rule ...
+# We need PKTS. busybox awk's gsub on '[\[\]]' proved unreliable in practice
+# (returned "[0" instead of "0"), so we use substr to slice off the leading
+# bracket explicitly.
 conn_rule_pkts() {
   iptables-save -c 2>/dev/null | awk -v c="$1" '
     /^\[/ && index($0, "-A eqos_forward") && index($0, c) {
-      f = $1; gsub(/[\[\]]/, "", f); split(f, a, ":")
-      print a[1]; exit
+      # $1 is "[PKTS:BYTES]" (whitespace-delimited token before -A).
+      # busybox awk gsub on /[\[\]]/ misfires (leaves leading bracket
+      # behind - observed in the wild). Use substr/split instead:
+      #   substr($1, 2) -> "PKTS:BYTES]"
+      #   split on ":" -> a[1]="PKTS", a[2]="BYTES]"
+      s = substr($1, 2)
+      split(s, a, ":")
+      print a[1]
+      exit
     }
   '
 }
@@ -332,7 +344,16 @@ else
       pkts=$(conn_rule_pkts "eqos:rule:eqotest_fwd[0]")
       [ -n "$pkts" ] && [ "$pkts" -gt 0 ] 2>/dev/null && return 0
       echo "[check_second_blocked] FAIL pkts='$pkts' (expected >0)" >> "$DIAG_LOG"
-      iptables−save −c 2>/dev/null | awk '/−A eqos_forward /' | sed 's/^/  /' >> "$DIAG_LOG"
+      # Dump both FORWARD (find where the SYN actually got matched) and
+      # eqos_forward (whether our connlimit rule fired).
+      {
+        echo " -- iptables-save -c (FORWARD + eqos_forward) --"
+        iptables-save -c 2>/dev/null | awk '
+          /^\[/ && (index($0, "-A FORWARD ") || index($0, "-A eqos_forward ")) {
+            print "   " $0
+          }
+        '
+      } >> "$DIAG_LOG"
       return 1
 		}
 		assert "conn_out limit=1: 2nd concurrent TCP REJECTed via FORWARD" check_second_blocked
@@ -352,7 +373,16 @@ else
       # a setup error; require an explicit "0" to count as success.
       [ "$pkts" = "0" ] && return 0
       echo "[check_high_cap_passes] FAIL pkts='$pkts' (expected '0')" >> "$DIAG_LOG"
-      iptables−save −c 2>/dev/null | awk '/−A eqos_forward /' | sed 's/^/  /' >> "$DIAG_LOG"
+      # Dump both FORWARD (find where the SYN actually got matched) and
+      # eqos_forward (whether our connlimit rule fired).
+      {
+        echo " -- iptables-save -c (FORWARD + eqos_forward) --"
+        iptables-save -c 2>/dev/null | awk '
+          /^\[/ && (index($0, "-A FORWARD ") || index($0, "-A eqos_forward ")) {
+            print "   " $0
+          }
+        '
+      } >> "$DIAG_LOG"
       return 1
 		}
 		assert "conn_out limit=1000: previously-blocked direction passes" check_high_cap_passes
@@ -373,7 +403,16 @@ else
       pkts=$(conn_rule_pkts "eqos:rule:eqotest_fwd[0]")
       [ −n "$pkts" ] && [ "$pkts" -gt 0 ] 2>/dev/null && return 0
       echo "[check_in_second_blocked] FAIL pkts='$pkts' (expected >0)" >> "$DIAG_LOG"
-      iptables−save −c 2>/dev/null | awk '/−A eqos_forward /' | sed 's/^/  /' >> "$DIAG_LOG"
+      # Dump both FORWARD (find where the SYN actually got matched) and
+      # eqos_forward (whether our connlimit rule fired).
+      {
+        echo " -- iptables-save -c (FORWARD + eqos_forward) --"
+        iptables-save -c 2>/dev/null | awk '
+          /^\[/ && (index($0, "-A FORWARD ") || index($0, "-A eqos_forward ")) {
+            print "   " $0
+          }
+        '
+      } >> "$DIAG_LOG"
       return 1
 		}
 		assert "conn_in limit=1: 2nd inbound TCP REJECTed via FORWARD" check_in_second_blocked
@@ -499,7 +538,16 @@ else
       pkts=$(conn_rule_pkts "eqos:rule:eqotest_sa[0]")
       [ −n "$pkts" ] && [ "$pkts" -gt 0 ] 2>/dev/null && return 0
       echo "[check_sa_blocked] FAIL pkts='$pkts' (expected >0)" >> "$DIAG_LOG"
-      iptables−save −c 2>/dev/null | awk '/−A eqos_forward /' | sed 's/^/  /' >> "$DIAG_LOG"
+      # Dump both FORWARD (find where the SYN actually got matched) and
+      # eqos_forward (whether our connlimit rule fired).
+      {
+        echo " -- iptables-save -c (FORWARD + eqos_forward) --"
+        iptables-save -c 2>/dev/null | awk '
+          /^\[/ && (index($0, "-A FORWARD ") || index($0, "-A eqos_forward ")) {
+            print "   " $0
+          }
+        '
+      } >> "$DIAG_LOG"
       return 1
 		}
 		assert "single-arm: 2nd TCP REJECTed (iifname=oifname=$SA_BR)" check_sa_blocked
@@ -516,7 +564,16 @@ else
       pkts=$(conn_rule_pkts "eqos:rule:eqotest_sa[0]")
       [ "$pkts" = "0" ] && return 0
       echo "[check_sa_pass] FAIL pkts='$pkts' (expected '0')" >> "$DIAG_LOG"
-      iptables−save −c 2>/dev/null | awk '/−A eqos_forward /' | sed 's/^/  /' >> "$DIAG_LOG"
+      # Dump both FORWARD (find where the SYN actually got matched) and
+      # eqos_forward (whether our connlimit rule fired).
+      {
+        echo " -- iptables-save -c (FORWARD + eqos_forward) --"
+        iptables-save -c 2>/dev/null | awk '
+          /^\[/ && (index($0, "-A FORWARD ") || index($0, "-A eqos_forward ")) {
+            print "   " $0
+          }
+        '
+      } >> "$DIAG_LOG"
       return 1
 		}
 		assert "single-arm: raised cap allows hairpin TCP" check_sa_pass

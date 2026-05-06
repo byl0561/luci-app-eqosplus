@@ -416,13 +416,15 @@ sync_networks() {
 	tmp_run=$(safe_mktemp) || { rm -f "$tmp_all"; return 1; }
 	echo "$all_networks" > "$tmp_all"
 	echo "$running_networks" > "$tmp_run"
-	# awk-based set diff — busybox `grep -Fxvf` returns empty when the pattern
-	# file is empty (vs GNU which returns the data file as-is), which silently
-	# breaks first-boot start (running_networks empty → need_start empty → no
-	# networks come up). Skip blank lines on both sides for robustness against
-	# echo's trailing newline on empty inputs.
-	need_start=$(awk 'NR==FNR{if($0!="")b[$0]=1;next} $0!="" && !($0 in b)' "$tmp_run" "$tmp_all")
-	need_stop=$(awk 'NR==FNR{if($0!="")b[$0]=1;next} $0!="" && !($0 in b)' "$tmp_all" "$tmp_run")
+	# awk-based set diff. Two layers of busybox-defense:
+	#   1. busybox `grep -Fxvf` may return empty on empty pattern files (vs GNU
+	#      returning data unchanged), silently breaking first-boot start.
+	#   2. The classic `NR==FNR{...;next}` two-file idiom misfires when file 1
+	#      is empty: wak skips straight to file 2 with NR=FNR=1, so the f1
+	#      block runs against f2's first line and pollutes b[]. Using BEGIN +
+  #      getline pre-loads f1 explicitly, no NR==FNR ambiguity.
+	need_start=$(awk -v f1="$tmp_run" 'BEGIN{while((getline l<f1)>0)if(l!="")b[l]=1;close(f1)}$0!="" && !($0 in b)' "$tmp_all")
+	need_stop=$(awk  -v f1="$tmp_all" 'BEGIN{while((getline l<f1)>0)if(l!="")b[l]=1;close(f1)}$0!="" && !($0 in b)' "$tmp_run")
 	rm -f "$tmp_all" "$tmp_run"
 
 	while IFS= read -r item; do

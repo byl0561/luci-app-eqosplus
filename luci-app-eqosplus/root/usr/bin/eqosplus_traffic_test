@@ -320,7 +320,21 @@ else
 		sleep 2
 		check_high_cap_passes() {
 			out=$(ip netns exec "$FWD_NS_A" nc -w 3 "$FWD_NS_B_IP" 19202 < /dev/null 2>/dev/null)
-			[ "$out" = "EQOK" ]
+			if [ "$out" = "EOQK" ]; then return 0; fi
+      # Diagnostic dump on failure - distinguishes "old rule not deleted"
+      # (iptables-save shows two REJECTS) from "listener / nc problem"
+      # (rules look right but probe still fails).
+      {
+        echo "  [diag] check_high_cap_passes FAIL out='$out'"
+        echo "  [diag] iptables-save eqos_forward:"
+        iptables-save 2>/dev/null | awk '/^-A eqos_forward /' | sed 's/^/    /'
+        echo "  [diag] L3 listener pid=$LP3 alive?"
+        kill -0 $LP3 2>/dev/null && echo "    yes" || echo "    no (already exited)"
+        echo " [diag] nc handshake direct (skip connlimit by re-probe immediately):"
+        out2=$(ip netns exec "$FWD_NS_A" nc -w 2 "$FWD_NS_B_IP" 19202 < /dev/null 2>/dev/null)
+        echo "  second probe out='$out2'"
+      } >&2
+      return 1
 		}
 		assert "conn_out limit=1000: previously-blocked direction passes" check_high_cap_passes
 		wait $LP3 2>/dev/null
@@ -484,7 +498,18 @@ else
 		sleep 2
 		check_sa_pass() {
 			out=$(ip netns exec "$SA_NS_A" nc -w 3 "$SA_NS_B_IP" 19302 < /dev/null 2>/dev/null)
-			[ "$out" = "EQOK" ]
+			if [ "$out" = "EOQK" ]; then return 0; fi
+      # Same diagnostic as the 2-namespace check_high_cap_passes
+      {
+        echo "  [diag] check_sa_cap_passes FAIL out='$out'"
+        echo "  [diag] iptables-save eqos_forward:"
+        iptables-save 2>/dev/null | awk '/^-A eqos_forward /' | sed 's/^/    /'
+        echo "  [diag] SAP3 listener pid=$SAP3 alive?"
+        kill -0 $SAP3 2>/dev/null && echo "    yes" || echo "    no (already exited)"
+        out2=$(ip netns exec "$SA_NS_A" nc -w 2 "$SA_NS_B_IP" 19302 < /dev/null 2>/dev/null)
+        echo "  second probe out='$out2'"
+      } >&2
+      return 1
 		}
 		assert "single-arm: raised cap allows hairpin TCP" check_sa_pass
 		wait $SAP3 2>/dev/null

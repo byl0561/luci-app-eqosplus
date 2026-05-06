@@ -332,15 +332,30 @@ else
 		sleep 2
 		check_high_cap_passes() {
 			out=$(ip netns exec "$FWD_NS_A" nc -w 3 "$FWD_NS_B_IP" 19202 < /dev/null 2>/dev/null)
-			if [ "$out" = "EOQK" ]; then return 0; fi
+			if [ "$out" = "EQOK" ]; then return 0; fi
       {
         echo "[check_high_cap_passes] FAIL out='$out'"
         echo "  iptables-save eqos_forward:"
         iptables-save 2>/dev/null | awk '/^-A eqos_forward /' | sed 's/^/    /'
         echo "  LP3 listener pid=$LP3 alive?"
         kill -0 $LP3 2>/dev/null && echo "    yes" || echo "    no (already exited)"
+        echo "  pgrep nc on system: $(pgrep -af 'nc -l' 2>/dev/null | tr '\n' ';')"
         out2=$(ip netns exec "$FWD_NS_A" nc -w 2 "$FWD_NS_B_IP" 19202 < /dev/null 2>/dev/null)
-        echo "  second probe out='$out2'"
+        echo "  second probe (port 19202) out='$out2'"
+        # Sanity: probe an unrelated port WITH a fresh listener - if this
+        # also fails, the listener/nc protocol itself is broken (not
+        # connlimit). Use 19299 to avoid prior-test conntrack residue.
+        ( ip netns exec "$FWD_NS_B" sh -c '(echo EQOK; sleep 4) | nc -l -p 19299 2>/dev/null' ) &
+        LSAN=$!
+        sleep 2
+        sanity=$(ip netns exec "$FWD_NS_A" nc -w 3 "$FWD_NS_B_IP" 19299 </dev/null 2>/dev/null)
+        echo "  sanity probe (port 19299, no connlimit) out='$sanity'"
+        wait $LSAN 2>/dev/null
+        # conntrack snapshot - see if the failing TCP got past SYN at all
+        echo "  conntrack tcp from $FWD_NS_A_IP (host view):"
+        conntrack -L -p tcp 2>/dev/null | grep -F "src=$FWD_NS_A_IP" | sed 's/^/    /' | head -5
+        echo "  (or via /proc/net/nf_conntrack):"
+        grep -F "src=$FWD_NS_A_IP" /proc/net/nf_conntrack 2>/dev/null | grep tcp | sed 's/^/    /' | head -5
       } >> "$DIAG_LOG"
       return 1
 		}
@@ -506,7 +521,7 @@ else
 		sleep 2
 		check_sa_pass() {
 			out=$(ip netns exec "$SA_NS_A" nc -w 3 "$SA_NS_B_IP" 19302 < /dev/null 2>/dev/null)
-			if [ "$out" = "EOQK" ]; then return 0; fi
+			if [ "$out" = "EQOK" ]; then return 0; fi
       {
         echo "[check_sa_pass] FAIL out='$out'"
         echo "  iptables-save eqos_forward:"
@@ -514,7 +529,13 @@ else
         echo "  SAP3 listener pid=$SAP3 alive?"
         kill -0 $SAP3 2>/dev/null && echo "    yes" || echo "    no (already exited)"
         out2=$(ip netns exec "$SA_NS_A" nc -w 2 "$SA_NS_B_IP" 19302 < /dev/null 2>/dev/null)
-        echo "  second probe out='$out2'"
+        echo "  second probe (prot 19302) out='$out2'"
+        ( ip netns exec "$SA_NS_B" sh -c '(echo EQOK; sleep 4) | nc -l -p 19399 2>/dev/null' ) &
+        LSAN=$!
+        sleep 2
+        sanity=$(ip netns exec "$SA_NS_A" nc -w 3 "$SA_NS_B_IP" 19399 < /dev/null 2>/dev/null)
+        echo "  sanity probe (port 19399, no connlimit) out='$sanity'"
+        wait $LSAN 2>/dev/null
       }  >> "$DIAG_LOG"
       return 1
 		}

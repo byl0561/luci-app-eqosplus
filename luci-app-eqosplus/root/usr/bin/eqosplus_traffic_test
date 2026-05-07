@@ -167,6 +167,15 @@ conn_rule_pkts() {
 	'
 }
 
+# Send a single TCP SYN from $1 (netns) to $2:$3. Returns immediately on
+# RST/REJECT/timeout. Uses busybox `wget -T 1` because nc inside netns proved
+# unreliable for sending SYNs on this build. We don't need an HTTP response,
+# just the SYN. The conntrack entry it creates is what connlimit observes.
+send_syn() {
+	ip netns exec "$1" wget -q -O /dev/null -T 1 "http://$2:$3/" 2>/dev/null
+	return 0
+}
+
 # Uses a dedicated 2-namespace topology so traffic actually traverses the
 # host's FORWARD chain (where our connlimit rules sit). The default veth
 # topology above (ns → host) hits INPUT and bypasses our rules entirely.
@@ -296,29 +305,39 @@ else
 		eqos_add_conn "eqotest_fwd[0]" "$FWD_NS_A_IP" "1" "1" out
 
 		# Probe pattern: listener-less, two-SYN, counter-based.
-		#   The busybox nc on stock OpenWrt (CONFIG_NC=y, all extras off) is
-		#   "Usage: nc [IPADDR PORT]" — no -l, no -p, no -w, no -z. So we can
-		#   neither listen nor set timeouts. Instead:
+		#   busybox nc on stock OpenWrt is the stripped "nc IPADDR PORT" form
+		#   — no listen, no flags. nc as a CLIENT works on host but inside
+		#   `ip netns exec` was unreliable empirically (no SYN observed).
+		#   Switched to busybox `wget` instead — it's installed by default
+		#   and reliably issues a TCP connect from inside netns.
+		#
 		#     1. Zero eqos_forward chain counters
-		#     2. Send 2 SYNs from ns_a to ns_b (different ports). Each SYN
-		#        creates a conntrack entry that connlimit-saddr counts. ns_b
-		#        has no listener → kernel RSTs each SYN; the conntrack entry
-		#        transitions to CLOSE state but stays in the table for
+		#     2. Send 2 SYNs from ns_a to ns_b (different ports) via wget.
+		#        Each SYN creates a conntrack entry that connlimit-saddr
+		#        counts. ns_b has no HTTP listener → kernel RSTs; conntrack
+		#        entry transitions to CLOSE state but stays in the table for
 		#        nf_conntrack_tcp_timeout_close (default 10s) — long enough
 		#        for the 2nd SYN to see count=2.
-		#     3. Read pkts on the REJECT rule via iptables-save -c
-		#        limit=1   → 2nd SYN: count=2 > 1   → REJECT → pkts > 0
+		#     3. Read pkts on the REJECT rule via iptables-save -c.
+		#        limit=1   → 2nd SYN: count=2 > 1    → REJECT → pkts > 0
 		#        limit=1000 → 2nd SYN: count=2 < 1000 → no match → pkts == 0
-		# nc exits quickly on RST/REJECT (ECONNREFUSED), so no listeners or
-		# background processes needed. iptables backend only.
+		# iptables backend only.
 
 		check_second_blocked() {
 			iptables -Z eqos_forward 2>/dev/null
-			ip netns exec "$FWD_NS_A" nc "$FWD_NS_B_IP" 19200 </dev/null >/dev/null 2>&1
-			ip netns exec "$FWD_NS_A" nc "$FWD_NS_B_IP" 19201 </dev/null >/dev/null 2>&1
+			send_syn "$FWD_NS_A" "$FWD_NS_B_IP" 19200
+			send_syn "$FWD_NS_A" "$FWD_NS_B_IP" 19201
 			pkts=$(conn_rule_pkts "eqos:rule:eqotest_fwd[0]")
 			[ -n "$pkts" ] && [ "$pkts" -gt 0 ] 2>/dev/null
 		}
+		# Diag: show that wget actually generates conntrack entries — if not,
+		# we know the SYN-send mechanism is broken regardless of connlimit.
+		send_syn "$FWD_NS_A" "$FWD_NS_B_IP" 19199
+		echo "  [diag] conntrack tcp entries with src=$FWD_NS_A_IP after one SYN:"
+		grep -F "src=$FWD_NS_A_IP" /proc/net/nf_conntrack 2>/dev/null \
+			| grep tcp | head -3 | sed 's/^/    /'
+		[ -z "$(grep -F "src=$FWD_NS_A_IP" /proc/net/nf_conntrack 2>/dev/null | grep tcp)" ] \
+			&& echo "    (no TCP entry — SYN was not sent or never reached host)"
 		assert "conn_out limit=1: 2nd concurrent TCP REJECTed via FORWARD" check_second_blocked
 
 		# Lift the limit and verify the same direction now passes — REJECT
@@ -327,8 +346,8 @@ else
 		eqos_add_conn "eqotest_fwd[0]" "$FWD_NS_A_IP" "1000" "1" out
 		check_high_cap_passes() {
 			iptables -Z eqos_forward 2>/dev/null
-			ip netns exec "$FWD_NS_A" nc "$FWD_NS_B_IP" 19202 </dev/null >/dev/null 2>&1
-			ip netns exec "$FWD_NS_A" nc "$FWD_NS_B_IP" 19203 </dev/null >/dev/null 2>&1
+			send_syn "$FWD_NS_A" "$FWD_NS_B_IP" 19202
+			send_syn "$FWD_NS_A" "$FWD_NS_B_IP" 19203
 			pkts=$(conn_rule_pkts "eqos:rule:eqotest_fwd[0]")
 			# Empty pkts ("" = rule not found) is a setup error; require "0"
 			[ "$pkts" = "0" ]
@@ -342,8 +361,8 @@ else
 		eqos_add_conn "eqotest_fwd[0]" "$FWD_NS_B_IP" "1" "1" in
 		check_in_second_blocked() {
 			iptables -Z eqos_forward 2>/dev/null
-			ip netns exec "$FWD_NS_A" nc "$FWD_NS_B_IP" 19210 </dev/null >/dev/null 2>&1
-			ip netns exec "$FWD_NS_A" nc "$FWD_NS_B_IP" 19211 </dev/null >/dev/null 2>&1
+			send_syn "$FWD_NS_A" "$FWD_NS_B_IP" 19210
+			send_syn "$FWD_NS_A" "$FWD_NS_B_IP" 19211
 			pkts=$(conn_rule_pkts "eqos:rule:eqotest_fwd[0]")
 			[ -n "$pkts" ] && [ "$pkts" -gt 0 ] 2>/dev/null
 		}
@@ -451,15 +470,13 @@ else
 		eqos_update_bypass_set  "eqotest_sa" "" ""
 		eqos_add_conn "eqotest_sa[0]" "$SA_NS_A_IP" "1" "1" out
 
-		# Same listener-less, two-SYN, counter-based probe as the 2-namespace
-		# section. busybox nc has no -l/-p/-w; just send two SYNs to ports
-		# with no listener, ns_b kernel RSTs both, conntrack entries persist
-		# in CLOSE state (~10s) long enough for connlimit-saddr count=2.
+		# Same wget-based two-SYN probe as the 2-namespace section. Reuses
+		# the send_syn helper defined there.
 
 		check_sa_blocked() {
 			iptables -Z eqos_forward 2>/dev/null
-			ip netns exec "$SA_NS_A" nc "$SA_NS_B_IP" 19300 </dev/null >/dev/null 2>&1
-			ip netns exec "$SA_NS_A" nc "$SA_NS_B_IP" 19301 </dev/null >/dev/null 2>&1
+			send_syn "$SA_NS_A" "$SA_NS_B_IP" 19300
+			send_syn "$SA_NS_A" "$SA_NS_B_IP" 19301
 			pkts=$(conn_rule_pkts "eqos:rule:eqotest_sa[0]")
 			[ -n "$pkts" ] && [ "$pkts" -gt 0 ] 2>/dev/null
 		}
@@ -470,8 +487,8 @@ else
 		eqos_add_conn "eqotest_sa[0]" "$SA_NS_A_IP" "1000" "1" out
 		check_sa_pass() {
 			iptables -Z eqos_forward 2>/dev/null
-			ip netns exec "$SA_NS_A" nc "$SA_NS_B_IP" 19302 </dev/null >/dev/null 2>&1
-			ip netns exec "$SA_NS_A" nc "$SA_NS_B_IP" 19303 </dev/null >/dev/null 2>&1
+			send_syn "$SA_NS_A" "$SA_NS_B_IP" 19302
+			send_syn "$SA_NS_A" "$SA_NS_B_IP" 19303
 			pkts=$(conn_rule_pkts "eqos:rule:eqotest_sa[0]")
 			[ "$pkts" = "0" ]
 		}

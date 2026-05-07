@@ -315,52 +315,81 @@ else
 		eqos_init_conn_network "eqotest_fwd" "$FWD_VHA"
 		eqos_update_bypass_set  "eqotest_fwd" "" ""
 
-		# Real listener + persistent FP1 holding 1 ESTABLISHED conntrack entry
-		ip netns exec "$FWD_NS_B" netcat -l -p 19200 > /dev/null 2>&1 &
-		sleep 1
-		ip netns exec "$FWD_NS_A" sh -c "(sleep 10) | netcat $FWD_NS_B_IP 19200" > /dev/null 2>&1 &
-		sleep 2
+		# CRITICAL ORDERING: nf_conncount (xt_connlimit's backend) is purely
+		# event-driven — it counts conntrack entries via NEW/DESTROY hook
+		# events received AFTER the rule was installed, and does NOT walk the
+		# pre-existing conntrack table. So a connection established BEFORE
+		# eqos_add_conn is invisible to the rule's count.
+		#
+		# Test pattern (per scenario):
+		#   1. eqos_add_conn → install REJECT rule with limit
+		#   2. Start FP1 (real listener + persistent client) — its NEW
+		#      conntrack event fires AFTER the rule is in place, so
+		#      nf_conncount counts it
+		#   3. Send probe SYN → count = 1 (FP1) + 1 (probe NEW) = 2 → REJECT
+		#      fires for limit=1, not for limit=1000
+		#   4. Tear down FP1 (killall) before next eqos_del_conn
 
-		# Outbound limit=1: 2nd SYN should fire REJECT (count=1+1=2 > 1)
+		# helper: spawn FP1 listener+client, return after handshake completes
+		_fp1_up() {
+			local lp=$1 cp=$2  # listener_port, dest_port (same)
+			ip netns exec "$FWD_NS_B" netcat -l -p "$lp" >/dev/null 2>&1 &
+			sleep 1
+			ip netns exec "$FWD_NS_A" sh -c "(sleep 30) | netcat $FWD_NS_B_IP $cp" >/dev/null 2>&1 &
+			sleep 6  # netcat handshake takes ~5s on this build
+		}
+		_fp1_down() {
+			killall -9 netcat 2>/dev/null
+			killall -9 sleep 2>/dev/null
+			# Tiny grace period for kernel to clean up sockets before next test
+			sleep 1
+			conntrack -F 2>/dev/null
+		}
+
+		# Outbound limit=1: install rule first, then FP1, then probe.
+		# CRITICAL: Do NOT `iptables -Z eqos_forward` before/after probe.
+		# `-Z` clears nf_conncount's internal per-rule tuple list, dropping
+		# FP1's tracked tuple. After -Z, count starts at 0 again, the probe
+		# SYN's own NEW entry brings count to 1, and `--connlimit-above 1`
+		# never fires. We capture pre-probe pkts and check the delta.
 		eqos_add_conn "eqotest_fwd[0]" "$FWD_NS_A_IP" "1" "1" out
-		iptables -Z eqos_forward 2>/dev/null
+		_fp1_up 19200 19200
+		_pkts_before=$(conn_rule_pkts "eqos:rule:eqotest_fwd[0]")
 		ip netns exec "$FWD_NS_A" nc "$FWD_NS_B_IP" 19201 </dev/null >/dev/null 2>&1
-		ip netns exec "$FWD_NS_A" nc "$FWD_NS_B_IP" 19202 </dev/null >/dev/null 2>&1
+		_pkts_after=$(conn_rule_pkts "eqos:rule:eqotest_fwd[0]")
 		check_second_blocked() {
-			pkts=$(conn_rule_pkts "eqos:rule:eqotest_fwd[0]")
-			[ -n "$pkts" ] && [ "$pkts" -gt 0 ] 2>/dev/null
+			[ -n "$_pkts_after" ] && [ "$_pkts_after" -gt "${_pkts_before:-0}" ] 2>/dev/null
 		}
 		assert "conn_out limit=1: 2nd concurrent TCP REJECTed via FORWARD" check_second_blocked
+		_fp1_down
 
-		# Outbound limit=1000: REJECT must NOT fire (count=2 <= 1000)
+		# Outbound limit=1000: REJECT must NOT fire (count=2 << 1000)
+		# Same delta-pkts pattern as above (no iptables -Z).
 		eqos_del_conn "eqotest_fwd[0]"
 		eqos_add_conn "eqotest_fwd[0]" "$FWD_NS_A_IP" "1000" "1" out
-		iptables -Z eqos_forward 2>/dev/null
+		_fp1_up 19200 19200
+		_pkts_before=$(conn_rule_pkts "eqos:rule:eqotest_fwd[0]")
 		ip netns exec "$FWD_NS_A" nc "$FWD_NS_B_IP" 19203 </dev/null >/dev/null 2>&1
-		ip netns exec "$FWD_NS_A" nc "$FWD_NS_B_IP" 19204 </dev/null >/dev/null 2>&1
+		_pkts_after=$(conn_rule_pkts "eqos:rule:eqotest_fwd[0]")
 		check_high_cap_passes() {
-			pkts=$(conn_rule_pkts "eqos:rule:eqotest_fwd[0]")
-			[ "$pkts" = "0" ]
+			# Pkts must NOT increase — REJECT didn't fire
+			[ "$_pkts_after" = "${_pkts_before:-0}" ]
 		}
 		assert "conn_out limit=1000: previously-blocked direction passes" check_high_cap_passes
+		_fp1_down
 
-		# Inbound limit=1: REJECT on dst=ns_b. FP1's entry has dst=ns_b too.
+		# Inbound limit=1: REJECT on dst=ns_b.
 		eqos_del_conn "eqotest_fwd[0]"
 		eqos_add_conn "eqotest_fwd[0]" "$FWD_NS_B_IP" "1" "1" in
-		iptables -Z eqos_forward 2>/dev/null
+		_fp1_up 19200 19200
+		_pkts_before=$(conn_rule_pkts "eqos:rule:eqotest_fwd[0]")
 		ip netns exec "$FWD_NS_A" nc "$FWD_NS_B_IP" 19205 </dev/null >/dev/null 2>&1
-		ip netns exec "$FWD_NS_A" nc "$FWD_NS_B_IP" 19206 </dev/null >/dev/null 2>&1
+		_pkts_after=$(conn_rule_pkts "eqos:rule:eqotest_fwd[0]")
 		check_in_second_blocked() {
-			pkts=$(conn_rule_pkts "eqos:rule:eqotest_fwd[0]")
-			[ -n "$pkts" ] && [ "$pkts" -gt 0 ] 2>/dev/null
+			[ -n "$_pkts_after" ] && [ "$_pkts_after" -gt "${_pkts_before:-0}" ] 2>/dev/null
 		}
 		assert "conn_in limit=1: 2nd inbound TCP REJECTed via FORWARD" check_in_second_blocked
-
-		# Kill listener + persistent client. `kill $PID` only kills the
-		# `ip netns exec` wrapper; the netcat inside the netns survives.
-		# pkill -f matches the netcat process by command line.
-		pkill -f "netcat -l -p 19200" 2>/dev/null
-		pkill -f "netcat $FWD_NS_B_IP 19200" 2>/dev/null
+		_fp1_down
 	else
 		echo "(skipped: 2-namespace setup failed; not root or veth/netns missing)"
 	fi
@@ -463,35 +492,42 @@ else
 		eqos_init_conn_network "eqotest_sa" "$SA_BR"
 		eqos_update_bypass_set  "eqotest_sa" "" ""
 
-		# Real listener + persistent FP1 in single-arm topology
-		ip netns exec "$SA_NS_B" netcat -l -p 19300 > /dev/null 2>&1 &
-		sleep 1
-		ip netns exec "$SA_NS_A" sh -c "(sleep 10) | netcat $SA_NS_B_IP 19300" > /dev/null 2>&1 &
-		sleep 2
+		# Same ordering rule as 2-namespace section (rule first, FP1 after).
+		_sa_fp1_up() {
+			ip netns exec "$SA_NS_B" netcat -l -p 19300 >/dev/null 2>&1 &
+			sleep 1
+			ip netns exec "$SA_NS_A" sh -c "(sleep 30) | netcat $SA_NS_B_IP 19300" >/dev/null 2>&1 &
+			sleep 6
+		}
+		_sa_fp1_down() {
+			killall -9 netcat 2>/dev/null
+			killall -9 sleep 2>/dev/null
+			sleep 1
+			conntrack -F 2>/dev/null
+		}
 
 		eqos_add_conn "eqotest_sa[0]" "$SA_NS_A_IP" "1" "1" out
-		iptables -Z eqos_forward 2>/dev/null
+		_sa_fp1_up
+		_pkts_before=$(conn_rule_pkts "eqos:rule:eqotest_sa[0]")
 		ip netns exec "$SA_NS_A" nc "$SA_NS_B_IP" 19301 </dev/null >/dev/null 2>&1
-		ip netns exec "$SA_NS_A" nc "$SA_NS_B_IP" 19302 </dev/null >/dev/null 2>&1
+		_pkts_after=$(conn_rule_pkts "eqos:rule:eqotest_sa[0]")
 		check_sa_blocked() {
-			pkts=$(conn_rule_pkts "eqos:rule:eqotest_sa[0]")
-			[ -n "$pkts" ] && [ "$pkts" -gt 0 ] 2>/dev/null
+			[ -n "$_pkts_after" ] && [ "$_pkts_after" -gt "${_pkts_before:-0}" ] 2>/dev/null
 		}
 		assert "single-arm: 2nd TCP REJECTed (iifname=oifname=$SA_BR)" check_sa_blocked
+		_sa_fp1_down
 
 		eqos_del_conn "eqotest_sa[0]"
 		eqos_add_conn "eqotest_sa[0]" "$SA_NS_A_IP" "1000" "1" out
-		iptables -Z eqos_forward 2>/dev/null
+		_sa_fp1_up
+		_pkts_before=$(conn_rule_pkts "eqos:rule:eqotest_sa[0]")
 		ip netns exec "$SA_NS_A" nc "$SA_NS_B_IP" 19303 </dev/null >/dev/null 2>&1
-		ip netns exec "$SA_NS_A" nc "$SA_NS_B_IP" 19304 </dev/null >/dev/null 2>&1
+		_pkts_after=$(conn_rule_pkts "eqos:rule:eqotest_sa[0]")
 		check_sa_pass() {
-			pkts=$(conn_rule_pkts "eqos:rule:eqotest_sa[0]")
-			[ "$pkts" = "0" ]
+			[ "$_pkts_after" = "${_pkts_before:-0}" ]
 		}
 		assert "single-arm: raised cap allows hairpin TCP" check_sa_pass
-
-		pkill -f "netcat -l -p 19300" 2>/dev/null
-		pkill -f "netcat $SA_NS_B_IP 19300" 2>/dev/null
+		_sa_fp1_down
 	else
 		echo "(skipped: bridge / namespace setup failed)"
 	fi

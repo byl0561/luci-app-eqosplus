@@ -315,20 +315,36 @@ else
 		# the previous block was specifically the connlimit, not setup noise.
 		eqos_del_conn "eqotest_fwd[0]"
 		eqos_add_conn "eqotest_fwd[0]" "$FWD_NS_A_IP" "1000" "1" out
-		# Diag: dump eqos_forward state so we can tell if del actually removed
-		# the limit=1 rule. Two rules here → del-by-comment didn't match.
-		echo "  [pre-raised-cap state]"
-		case "$EQOS_BACKEND" in
-			iptables) iptables  -L eqos_forward --line-numbers -nv 2>/dev/null | sed 's/^/    /' ;;
-			nft)      nft list chain inet eqosplus forward 2>/dev/null | sed 's/^/    /' ;;
-		esac
 		( ip netns exec "$FWD_NS_B" sh -c 'sleep 6 | nc -l -p 19202 > /dev/null 2>&1' ) &
 		LP3=$!
 		sleep 2
 		check_high_cap_passes() {
 			ip netns exec "$FWD_NS_A" nc -z -w 3 "$FWD_NS_B_IP" 19202 2>/dev/null
 		}
+		# Diag: zero FORWARD + eqos_forward counters so the post-probe dump
+		# attributes pkts to THIS probe only. Pre-probe FORWARD dump shows
+		# whether ACCEPT punches are still in place at expected positions.
+		echo "  [diag pre-probe] LP3 alive: $(kill -0 $LP3 2>/dev/null && echo yes || echo NO)"
+		echo "  [diag pre-probe] FORWARD top:"
+		case "$EQOS_BACKEND" in
+			iptables) iptables -L FORWARD --line-numbers -nv 2>/dev/null | head -8 | sed 's/^/    /' ;;
+			nft)      nft list chain inet fw4 forward 2>/dev/null | head -15 | sed 's/^/    /' ;;
+		esac
+		[ "$EQOS_BACKEND" = "iptables" ] && {
+			iptables -Z FORWARD       2>/dev/null
+			iptables -Z eqos_forward  2>/dev/null
+		}
 		assert "conn_out limit=1000: previously-blocked direction passes" check_high_cap_passes
+		echo "  [diag post-probe] FORWARD top (probe-only counters):"
+		case "$EQOS_BACKEND" in
+			iptables) iptables -L FORWARD --line-numbers -nv 2>/dev/null | head -8 | sed 's/^/    /' ;;
+			nft)      nft list chain inet fw4 forward 2>/dev/null | head -15 | sed 's/^/    /' ;;
+		esac
+		echo "  [diag post-probe] eqos_forward (probe-only counters):"
+		case "$EQOS_BACKEND" in
+			iptables) iptables -L eqos_forward --line-numbers -nv 2>/dev/null | sed 's/^/    /' ;;
+			nft)      nft list chain inet eqosplus forward 2>/dev/null | sed 's/^/    /' ;;
+		esac
 		wait $LP3 2>/dev/null
 
 		# ---- Inbound test: limit ns_b's incoming TCP from any source ----
@@ -482,18 +498,33 @@ else
 		# Quick sanity: lifting cap restores connectivity in the same hairpin
 		eqos_del_conn "eqotest_sa[0]"
 		eqos_add_conn "eqotest_sa[0]" "$SA_NS_A_IP" "1000" "1" out
-		echo "  [pre-raised-cap state]"
-		case "$EQOS_BACKEND" in
-			iptables) iptables  -L eqos_forward --line-numbers -nv 2>/dev/null | sed 's/^/    /' ;;
-			nft)      nft list chain inet eqosplus forward 2>/dev/null | sed 's/^/    /' ;;
-		esac
 		( ip netns exec "$SA_NS_B" sh -c 'sleep 6 | nc -l -p 19302 > /dev/null 2>&1' ) &
 		SAP3=$!
 		sleep 2
 		check_sa_pass() {
 			ip netns exec "$SA_NS_A" nc -z -w 3 "$SA_NS_B_IP" 19302 2>/dev/null
 		}
+		echo "  [diag pre-probe] SAP3 alive: $(kill -0 $SAP3 2>/dev/null && echo yes || echo NO)"
+		echo "  [diag pre-probe] FORWARD top:"
+		case "$EQOS_BACKEND" in
+			iptables) iptables -L FORWARD --line-numbers -nv 2>/dev/null | head -8 | sed 's/^/    /' ;;
+			nft)      nft list chain inet fw4 forward 2>/dev/null | head -15 | sed 's/^/    /' ;;
+		esac
+		[ "$EQOS_BACKEND" = "iptables" ] && {
+			iptables -Z FORWARD       2>/dev/null
+			iptables -Z eqos_forward  2>/dev/null
+		}
 		assert "single-arm: raised cap allows hairpin TCP" check_sa_pass
+		echo "  [diag post-probe] FORWARD top (probe-only counters):"
+		case "$EQOS_BACKEND" in
+			iptables) iptables -L FORWARD --line-numbers -nv 2>/dev/null | head -8 | sed 's/^/    /' ;;
+			nft)      nft list chain inet fw4 forward 2>/dev/null | head -15 | sed 's/^/    /' ;;
+		esac
+		echo "  [diag post-probe] eqos_forward (probe-only counters):"
+		case "$EQOS_BACKEND" in
+			iptables) iptables -L eqos_forward --line-numbers -nv 2>/dev/null | sed 's/^/    /' ;;
+			nft)      nft list chain inet eqosplus forward 2>/dev/null | sed 's/^/    /' ;;
+		esac
 		wait $SAP3 2>/dev/null
 	else
 		echo "(skipped: bridge / namespace setup failed)"

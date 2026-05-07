@@ -222,6 +222,9 @@ cleanup_fwd() {
 	# Remove fw3/iptables holes by exact match
 	iptables -D FORWARD -i "$FWD_VHA" -o "$FWD_VHB" -j ACCEPT 2>/dev/null
 	iptables -D FORWARD -i "$FWD_VHB" -o "$FWD_VHA" -j ACCEPT 2>/dev/null
+	# Remove explicit CT raw rules (forced conntrack tracking on test ifaces)
+	iptables -t raw -D PREROUTING -i "$FWD_VHA" -j CT 2>/dev/null
+	iptables -t raw -D PREROUTING -i "$FWD_VHB" -j CT 2>/dev/null
 	# Always nuke namespaces and veths (idempotent — silently no-op if absent)
 	ip netns del "$FWD_NS_A" 2>/dev/null
 	ip netns del "$FWD_NS_B" 2>/dev/null
@@ -274,6 +277,16 @@ else
 		else
 			iptables -I FORWARD -i "$FWD_VHA" -o "$FWD_VHB" -j ACCEPT 2>/dev/null
 			iptables -I FORWARD -i "$FWD_VHB" -o "$FWD_VHA" -j ACCEPT 2>/dev/null
+		fi
+
+		# Force conntrack tracking on test interfaces. fw3 only auto-tracks
+		# traffic that enters via a zoned interface (br-lan etc.); ad-hoc
+		# veth pairs are silently bypassed → connlimit always sees count=0
+		# → REJECT never fires. Explicit `-j CT` in raw PREROUTING ensures
+		# every packet on these interfaces gets a conntrack entry.
+		if [ "$EQOS_BACKEND" = "iptables" ]; then
+			iptables -t raw -I PREROUTING -i "$FWD_VHA" -j CT 2>/dev/null
+			iptables -t raw -I PREROUTING -i "$FWD_VHB" -j CT 2>/dev/null
 		fi
 
 		FWD_SETUP_OK=1
@@ -330,14 +343,6 @@ else
 			pkts=$(conn_rule_pkts "eqos:rule:eqotest_fwd[0]")
 			[ -n "$pkts" ] && [ "$pkts" -gt 0 ] 2>/dev/null
 		}
-		# Diag: show that wget actually generates conntrack entries — if not,
-		# we know the SYN-send mechanism is broken regardless of connlimit.
-		send_syn "$FWD_NS_A" "$FWD_NS_B_IP" 19199
-		echo "  [diag] conntrack tcp entries with src=$FWD_NS_A_IP after one SYN:"
-		grep -F "src=$FWD_NS_A_IP" /proc/net/nf_conntrack 2>/dev/null \
-			| grep tcp | head -3 | sed 's/^/    /'
-		[ -z "$(grep -F "src=$FWD_NS_A_IP" /proc/net/nf_conntrack 2>/dev/null | grep tcp)" ] \
-			&& echo "    (no TCP entry — SYN was not sent or never reached host)"
 		assert "conn_out limit=1: 2nd concurrent TCP REJECTed via FORWARD" check_second_blocked
 
 		# Lift the limit and verify the same direction now passes — REJECT
@@ -398,6 +403,8 @@ cleanup_sa() {
 		done
 	fi
 	iptables -D FORWARD -i "$SA_BR" -o "$SA_BR" -j ACCEPT 2>/dev/null
+	# Remove explicit CT raw rule
+	iptables -t raw -D PREROUTING -i "$SA_BR" -j CT 2>/dev/null
 	ip netns del "$SA_NS_A" 2>/dev/null
 	ip netns del "$SA_NS_B" 2>/dev/null
 	ip link del "$SA_VHA" 2>/dev/null
@@ -447,6 +454,10 @@ else
 			SA_FW_HANDLES="$h"
 		else
 			iptables -I FORWARD -i "$SA_BR" -o "$SA_BR" -j ACCEPT 2>/dev/null
+			# Force conntrack tracking on the bridge — see same comment in
+			# the 2-namespace setup. Without this, fw3 silently bypasses
+			# tracking on non-zoned interfaces and connlimit always sees 0.
+			iptables -t raw -I PREROUTING -i "$SA_BR" -j CT 2>/dev/null
 		fi
 		SA_SETUP_OK=1
 	fi

@@ -309,6 +309,26 @@ else
 		# Independent of nc behavior. iptables backend only — nft would need
 		# `nft reset counter` plus a different parser.
 
+		# Diag: probe what nc on this busybox actually does. Capture stderr
+		# from a probe listener and a probe client; check /proc/net/tcp
+		# (port 19999 = 0x4E1F hex) to see if listening socket actually bound.
+		echo "  [nc sanity] usage banner:"
+		ip netns exec "$FWD_NS_B" sh -c 'nc 2>&1; echo "===HELP==="; nc -h 2>&1' \
+			| head -10 | sed 's/^/    /'
+		NC_LISTEN_LOG=/tmp/eq_nc_listen.$$
+		( ip netns exec "$FWD_NS_B" sh -c 'sleep 5 | nc -l -p 19999' ) \
+			>"$NC_LISTEN_LOG" 2>&1 &
+		NC_LISTEN_PID=$!
+		sleep 1
+		echo "  [nc sanity] nc -l -p 19999 stderr:"
+		[ -s "$NC_LISTEN_LOG" ] && head -3 "$NC_LISTEN_LOG" | sed 's/^/    /' || echo "    (silent)"
+		echo "  [nc sanity] /proc/net/tcp in ns_b (port 19999 = :4E1F):"
+		ip netns exec "$FWD_NS_B" cat /proc/net/tcp 2>/dev/null \
+			| awk 'NR==1 || $2 ~ /:4E1F$/{print}' | sed 's/^/    /'
+		kill $NC_LISTEN_PID 2>/dev/null
+		wait $NC_LISTEN_PID 2>/dev/null
+		rm -f "$NC_LISTEN_LOG"
+
 		# First conn occupies slot 1 (LP1 + FP1 keep one connection alive)
 		( ip netns exec "$FWD_NS_B" sh -c 'sleep 10 | nc -l -p 19200 > /dev/null 2>&1' ) &
 		LP1=$!
@@ -316,18 +336,6 @@ else
 		( ip netns exec "$FWD_NS_A" sh -c 'sleep 6 | nc -w 6 '"$FWD_NS_B_IP"' 19200 > /dev/null 2>&1' ) &
 		FP1=$!
 		sleep 2
-
-		# Diag: verify FP1 actually established. If not, conntrack has no
-		# src=ns_a entry, count=0+1=1, "above 1" is FALSE, REJECT never fires
-		# even when it should.
-		echo "  [diag pre-blocked] LP1 alive: $(kill -0 $LP1 2>/dev/null && echo yes || echo NO)"
-		echo "  [diag pre-blocked] FP1 alive: $(kill -0 $FP1 2>/dev/null && echo yes || echo NO)"
-		echo "  [diag pre-blocked] listeners in ns_b:"
-		ip netns exec "$FWD_NS_B" sh -c 'netstat -lnt 2>/dev/null || ss -lnt 2>/dev/null' \
-			| grep -E ':192[0-9][0-9]' | sed 's/^/    /'
-		echo "  [diag pre-blocked] conntrack entries from $FWD_NS_A_IP:"
-		grep -F "src=$FWD_NS_A_IP" /proc/net/nf_conntrack 2>/dev/null \
-			| awk '{print "    " $0}' | head -5
 
 		check_second_blocked() {
 			iptables -Z eqos_forward 2>/dev/null

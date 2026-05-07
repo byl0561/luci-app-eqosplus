@@ -360,8 +360,10 @@ eqos_add_conn_nft() {
 	local proto_match=""
 	[ "$tcp_only" = "1" ] && proto_match="meta l4proto tcp"
 
+	# `counter` placed AFTER `ct count over` so it only increments on REJECT
+	# hits (same semantics as iptables `-j REJECT` per-rule pkt counter).
 	# shellcheck disable=SC2086
-	nft add rule inet eqosplus forward $match $proto_match ct count over "$limit" reject comment "\"eqos:rule:${rule_id}\"" 2>/dev/null
+	nft add rule inet eqosplus forward $match $proto_match ct count over "$limit" counter reject comment "\"eqos:rule:${rule_id}\"" 2>/dev/null
 }
 
 # Usage: eqos_del_conn_nft <rule_id>

@@ -178,14 +178,29 @@ if ! command -v netcat >/dev/null 2>&1 \
 	exit 1
 fi
 
-# Returns pkts on the REJECT rule with given comment, via iptables-save -c.
-# busybox awk gsub on /[\[\]]/ misfires; substr+split avoids that.
+# Returns pkts on the REJECT rule with given comment.
+#  - iptables: parsed from `iptables-save -c` "[pkts:bytes]" prefix.
+#  - nft:      parsed from `nft list chain` "counter packets <N> bytes <N>";
+#              requires the rule to be installed with the `counter` keyword
+#              (eqos_add_conn_nft does so — semantics: count only REJECT hits).
+# busybox awk gsub on /[\[\]]/ misfires; substr+split / index() avoid that.
 conn_rule_pkts() {
-	iptables-save -c 2>/dev/null | awk -v c="$1" '
-		/^\[/ && /-A eqos_forward / && index($0, c) {
-			s = substr($1, 2); split(s, a, ":"); print a[1]; exit
-		}
-	'
+	case "$EQOS_BACKEND" in
+		iptables)
+			iptables-save -c 2>/dev/null | awk -v c="$1" '
+				/^\[/ && /-A eqos_forward / && index($0, c) {
+					s = substr($1, 2); split(s, a, ":"); print a[1]; exit
+				}
+			'
+			;;
+		nft)
+			nft list chain inet eqosplus forward 2>/dev/null | awk -v c="$1" '
+				index($0, c) {
+					for (i = 1; i < NF; i++) if ($i == "packets") { print $(i+1); exit }
+				}
+			'
+			;;
+	esac
 }
 
 # Uses a dedicated 2-namespace topology so traffic actually traverses the

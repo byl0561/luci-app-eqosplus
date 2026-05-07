@@ -278,17 +278,15 @@ else
 		eqos_update_bypass_set  "eqotest_fwd" "" ""
 		eqos_add_conn "eqotest_fwd[0]" "$FWD_NS_A_IP" "1" "1" out
 
-		# Probe pattern: data-based.
-		#   Listener: `(echo EQOK; sleep N) | nc -l -p PORT` — EQOK is queued
-		#   into nc's stdin BEFORE any client connects, so the moment the TCP
-		#   handshake completes nc flushes EQOK to the socket. The trailing
-		#   `sleep N` keeps the pipe (and listener) alive long enough for the
-		#   client to read.
-		#   Client: `nc -w 3 IP PORT </dev/null` — sends SYN, reads stdout,
-		#   `-w 3` gives 3s for the listener to write before idle timeout.
-		#   Pass: stdout == "EQOK" (handshake completed AND data flowed).
-		#   Block: stdout != "EQOK" (REJECT fired or connection refused).
-		# This is backend-agnostic (works for both nft and iptables).
+		# Probe pattern: TCP handshake only (`nc -z`).
+		#   `nc -z` sends SYN, completes (or fails) the 3-way handshake, and
+		#   exits — no data exchange. Avoids the busybox nc stdin-EOF race
+		#   that breaks the EQOK data probe (client `< /dev/null` FINs before
+		#   listener can flush data; -z doesn't transfer data so no race).
+		#   Pass (handshake OK):    nc exits 0
+		#   Block (REJECT / RST):   nc exits non-0 (ICMP unreachable / TCP RST)
+		# Listener is a long-lived nc bound on the port; just keeps the kernel
+		# from RSTing "no listener" — its stdin/stdout don't matter for -z.
 
 		# First conn occupies slot 1 (LP1 + FP1 keep one connection alive)
 		( ip netns exec "$FWD_NS_B" sh -c 'sleep 10 | nc -l -p 19200 > /dev/null 2>&1' ) &
@@ -298,14 +296,14 @@ else
 		FP1=$!
 		sleep 2
 
-		# Second listener — uses the EQOK probe so the assertion is data-based
-		( ip netns exec "$FWD_NS_B" sh -c '(echo EQOK; sleep 5) | nc -l -p 19201 2>/dev/null' ) &
+		# Second listener for the would-be-blocked probe (REJECTed before
+		# reaching listener, but bind it anyway for symmetry).
+		( ip netns exec "$FWD_NS_B" sh -c 'sleep 6 | nc -l -p 19201 > /dev/null 2>&1' ) &
 		LP2=$!
 		sleep 2
 
 		check_second_blocked() {
-			out=$(ip netns exec "$FWD_NS_A" nc -w 3 "$FWD_NS_B_IP" 19201 < /dev/null 2>/dev/null)
-			[ "$out" != "EQOK" ]
+			! ip netns exec "$FWD_NS_A" nc -z -w 3 "$FWD_NS_B_IP" 19201 2>/dev/null
 		}
 		assert "conn_out limit=1: 2nd concurrent TCP REJECTed via FORWARD" check_second_blocked
 
@@ -324,12 +322,11 @@ else
 			iptables) iptables  -L eqos_forward --line-numbers -nv 2>/dev/null | sed 's/^/    /' ;;
 			nft)      nft list chain inet eqosplus forward 2>/dev/null | sed 's/^/    /' ;;
 		esac
-		( ip netns exec "$FWD_NS_B" sh -c '(echo EQOK; sleep 5) | nc -l -p 19202 2>/dev/null' ) &
+		( ip netns exec "$FWD_NS_B" sh -c 'sleep 6 | nc -l -p 19202 > /dev/null 2>&1' ) &
 		LP3=$!
 		sleep 2
 		check_high_cap_passes() {
-			out=$(ip netns exec "$FWD_NS_A" nc -w 3 "$FWD_NS_B_IP" 19202 < /dev/null 2>/dev/null)
-			[ "$out" = "EQOK" ]
+			ip netns exec "$FWD_NS_A" nc -z -w 3 "$FWD_NS_B_IP" 19202 2>/dev/null
 		}
 		assert "conn_out limit=1000: previously-blocked direction passes" check_high_cap_passes
 		wait $LP3 2>/dev/null
@@ -346,12 +343,11 @@ else
 		( ip netns exec "$FWD_NS_A" sh -c 'sleep 6 | nc -w 6 '"$FWD_NS_B_IP"' 19210 > /dev/null 2>&1' ) &
 		FP2=$!
 		sleep 2
-		( ip netns exec "$FWD_NS_B" sh -c '(echo EQOK; sleep 5) | nc -l -p 19211 2>/dev/null' ) &
+		( ip netns exec "$FWD_NS_B" sh -c 'sleep 6 | nc -l -p 19211 > /dev/null 2>&1' ) &
 		LP5=$!
 		sleep 2
 		check_in_second_blocked() {
-			out=$(ip netns exec "$FWD_NS_A" nc -w 3 "$FWD_NS_B_IP" 19211 < /dev/null 2>/dev/null)
-			[ "$out" != "EQOK" ]
+			! ip netns exec "$FWD_NS_A" nc -z -w 3 "$FWD_NS_B_IP" 19211 2>/dev/null
 		}
 		assert "conn_in limit=1: 2nd inbound TCP REJECTed via FORWARD" check_in_second_blocked
 		wait $FP2 2>/dev/null
@@ -460,8 +456,8 @@ else
 		eqos_update_bypass_set  "eqotest_sa" "" ""
 		eqos_add_conn "eqotest_sa[0]" "$SA_NS_A_IP" "1" "1" out
 
-		# Same EQOK probe pattern as the 2-namespace section above — see comment
-		# there for rationale. Backend-agnostic (works for nft and iptables).
+		# Same `nc -z` probe pattern as the 2-namespace section above — see
+		# comment there for rationale. Backend-agnostic.
 
 		# First conn occupies slot 1
 		( ip netns exec "$SA_NS_B" sh -c 'sleep 10 | nc -l -p 19300 > /dev/null 2>&1' ) &
@@ -470,13 +466,12 @@ else
 		( ip netns exec "$SA_NS_A" sh -c 'sleep 6 | nc -w 6 '"$SA_NS_B_IP"' 19300 > /dev/null 2>&1' ) &
 		SAF1=$!
 		sleep 2
-		( ip netns exec "$SA_NS_B" sh -c '(echo EQOK; sleep 5) | nc -l -p 19301 2>/dev/null' ) &
+		( ip netns exec "$SA_NS_B" sh -c 'sleep 6 | nc -l -p 19301 > /dev/null 2>&1' ) &
 		SAP2=$!
 		sleep 2
 
 		check_sa_blocked() {
-			out=$(ip netns exec "$SA_NS_A" nc -w 3 "$SA_NS_B_IP" 19301 < /dev/null 2>/dev/null)
-			[ "$out" != "EQOK" ]
+			! ip netns exec "$SA_NS_A" nc -z -w 3 "$SA_NS_B_IP" 19301 2>/dev/null
 		}
 		assert "single-arm: 2nd TCP REJECTed (iifname=oifname=$SA_BR)" check_sa_blocked
 
@@ -492,12 +487,11 @@ else
 			iptables) iptables  -L eqos_forward --line-numbers -nv 2>/dev/null | sed 's/^/    /' ;;
 			nft)      nft list chain inet eqosplus forward 2>/dev/null | sed 's/^/    /' ;;
 		esac
-		( ip netns exec "$SA_NS_B" sh -c '(echo EQOK; sleep 5) | nc -l -p 19302 2>/dev/null' ) &
+		( ip netns exec "$SA_NS_B" sh -c 'sleep 6 | nc -l -p 19302 > /dev/null 2>&1' ) &
 		SAP3=$!
 		sleep 2
 		check_sa_pass() {
-			out=$(ip netns exec "$SA_NS_A" nc -w 3 "$SA_NS_B_IP" 19302 < /dev/null 2>/dev/null)
-			[ "$out" = "EQOK" ]
+			ip netns exec "$SA_NS_A" nc -z -w 3 "$SA_NS_B_IP" 19302 2>/dev/null
 		}
 		assert "single-arm: raised cap allows hairpin TCP" check_sa_pass
 		wait $SAP3 2>/dev/null

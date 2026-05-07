@@ -295,63 +295,31 @@ else
 		eqos_update_bypass_set  "eqotest_fwd" "" ""
 		eqos_add_conn "eqotest_fwd[0]" "$FWD_NS_A_IP" "1" "1" out
 
-		# Probe pattern: counter-based, observe the REJECT rule directly.
-		# Earlier nc-exit-code approaches (data-EQOK, then `nc -z`) both
-		# masked failures: `nc -z` is unsupported on this busybox build (nc
-		# errors out before sending SYN, so REJECT tests passed for the wrong
-		# reason and "raised cap" tests always failed). Counter-based:
-		#   1. Zero eqos_forward chain counters
-		#   2. Trigger one TCP connect via plain `nc -w 1 < /dev/null`
-		#      (don't care about exit code)
-		#   3. Read pkts on the rule's REJECT entry via iptables-save -c
-		#      Blocked: pkts > 0 (REJECT fired)
-		#      Passed:  pkts = 0 (rule didn't match)
-		# Independent of nc behavior. iptables backend only — nft would need
-		# `nft reset counter` plus a different parser.
-
-		# Diag: probe what nc on this busybox actually does. Capture stderr
-		# from a probe listener and a probe client; check /proc/net/tcp
-		# (port 19999 = 0x4E1F hex) to see if listening socket actually bound.
-		echo "  [nc sanity] usage banner:"
-		ip netns exec "$FWD_NS_B" sh -c 'nc 2>&1; echo "===HELP==="; nc -h 2>&1' \
-			| head -10 | sed 's/^/    /'
-		NC_LISTEN_LOG=/tmp/eq_nc_listen.$$
-		( ip netns exec "$FWD_NS_B" sh -c 'sleep 5 | nc -l -p 19999' ) \
-			>"$NC_LISTEN_LOG" 2>&1 &
-		NC_LISTEN_PID=$!
-		sleep 1
-		echo "  [nc sanity] nc -l -p 19999 stderr:"
-		[ -s "$NC_LISTEN_LOG" ] && head -3 "$NC_LISTEN_LOG" | sed 's/^/    /' || echo "    (silent)"
-		echo "  [nc sanity] /proc/net/tcp in ns_b (port 19999 = :4E1F):"
-		ip netns exec "$FWD_NS_B" cat /proc/net/tcp 2>/dev/null \
-			| awk 'NR==1 || $2 ~ /:4E1F$/{print}' | sed 's/^/    /'
-		kill $NC_LISTEN_PID 2>/dev/null
-		wait $NC_LISTEN_PID 2>/dev/null
-		rm -f "$NC_LISTEN_LOG"
-
-		# First conn occupies slot 1 (LP1 + FP1 keep one connection alive)
-		( ip netns exec "$FWD_NS_B" sh -c 'sleep 10 | nc -l -p 19200 > /dev/null 2>&1' ) &
-		LP1=$!
-		sleep 2
-		( ip netns exec "$FWD_NS_A" sh -c 'sleep 6 | nc -w 6 '"$FWD_NS_B_IP"' 19200 > /dev/null 2>&1' ) &
-		FP1=$!
-		sleep 2
+		# Probe pattern: listener-less, two-SYN, counter-based.
+		#   The busybox nc on stock OpenWrt (CONFIG_NC=y, all extras off) is
+		#   "Usage: nc [IPADDR PORT]" — no -l, no -p, no -w, no -z. So we can
+		#   neither listen nor set timeouts. Instead:
+		#     1. Zero eqos_forward chain counters
+		#     2. Send 2 SYNs from ns_a to ns_b (different ports). Each SYN
+		#        creates a conntrack entry that connlimit-saddr counts. ns_b
+		#        has no listener → kernel RSTs each SYN; the conntrack entry
+		#        transitions to CLOSE state but stays in the table for
+		#        nf_conntrack_tcp_timeout_close (default 10s) — long enough
+		#        for the 2nd SYN to see count=2.
+		#     3. Read pkts on the REJECT rule via iptables-save -c
+		#        limit=1   → 2nd SYN: count=2 > 1   → REJECT → pkts > 0
+		#        limit=1000 → 2nd SYN: count=2 < 1000 → no match → pkts == 0
+		# nc exits quickly on RST/REJECT (ECONNREFUSED), so no listeners or
+		# background processes needed. iptables backend only.
 
 		check_second_blocked() {
 			iptables -Z eqos_forward 2>/dev/null
-			iptables -Z FORWARD      2>/dev/null
-			ip netns exec "$FWD_NS_A" nc -w 1 "$FWD_NS_B_IP" 19201 < /dev/null > /dev/null 2>&1
+			ip netns exec "$FWD_NS_A" nc "$FWD_NS_B_IP" 19200 </dev/null >/dev/null 2>&1
+			ip netns exec "$FWD_NS_A" nc "$FWD_NS_B_IP" 19201 </dev/null >/dev/null 2>&1
 			pkts=$(conn_rule_pkts "eqos:rule:eqotest_fwd[0]")
 			[ -n "$pkts" ] && [ "$pkts" -gt 0 ] 2>/dev/null
 		}
 		assert "conn_out limit=1: 2nd concurrent TCP REJECTed via FORWARD" check_second_blocked
-		echo "  [diag post-blocked] FORWARD jump pkts (probe-only):"
-		iptables -L FORWARD --line-numbers -nv 2>/dev/null | head -8 | sed 's/^/    /'
-		echo "  [diag post-blocked] eqos_forward (probe-only):"
-		iptables -L eqos_forward --line-numbers -nv 2>/dev/null | sed 's/^/    /'
-
-		wait $FP1 2>/dev/null
-		wait $LP1 2>/dev/null
 
 		# Lift the limit and verify the same direction now passes — REJECT
 		# rule's pkts must stay at 0.
@@ -359,7 +327,8 @@ else
 		eqos_add_conn "eqotest_fwd[0]" "$FWD_NS_A_IP" "1000" "1" out
 		check_high_cap_passes() {
 			iptables -Z eqos_forward 2>/dev/null
-			ip netns exec "$FWD_NS_A" nc -w 1 "$FWD_NS_B_IP" 19202 < /dev/null > /dev/null 2>&1
+			ip netns exec "$FWD_NS_A" nc "$FWD_NS_B_IP" 19202 </dev/null >/dev/null 2>&1
+			ip netns exec "$FWD_NS_A" nc "$FWD_NS_B_IP" 19203 </dev/null >/dev/null 2>&1
 			pkts=$(conn_rule_pkts "eqos:rule:eqotest_fwd[0]")
 			# Empty pkts ("" = rule not found) is a setup error; require "0"
 			[ "$pkts" = "0" ]
@@ -368,25 +337,17 @@ else
 
 		# ---- Inbound test: limit ns_b's incoming TCP from any source ----
 		# Direction "in" matches ip daddr = $FWD_NS_B_IP. With limit=1, the
-		# first TCP into ns_b takes a slot; the second must REJECT.
+		# 2nd TCP into ns_b should REJECT.
 		eqos_del_conn "eqotest_fwd[0]"
 		eqos_add_conn "eqotest_fwd[0]" "$FWD_NS_B_IP" "1" "1" in
-
-		( ip netns exec "$FWD_NS_B" sh -c 'sleep 10 | nc -l -p 19210 > /dev/null 2>&1' ) &
-		LP4=$!
-		sleep 2
-		( ip netns exec "$FWD_NS_A" sh -c 'sleep 6 | nc -w 6 '"$FWD_NS_B_IP"' 19210 > /dev/null 2>&1' ) &
-		FP2=$!
-		sleep 2
 		check_in_second_blocked() {
 			iptables -Z eqos_forward 2>/dev/null
-			ip netns exec "$FWD_NS_A" nc -w 1 "$FWD_NS_B_IP" 19211 < /dev/null > /dev/null 2>&1
+			ip netns exec "$FWD_NS_A" nc "$FWD_NS_B_IP" 19210 </dev/null >/dev/null 2>&1
+			ip netns exec "$FWD_NS_A" nc "$FWD_NS_B_IP" 19211 </dev/null >/dev/null 2>&1
 			pkts=$(conn_rule_pkts "eqos:rule:eqotest_fwd[0]")
 			[ -n "$pkts" ] && [ "$pkts" -gt 0 ] 2>/dev/null
 		}
 		assert "conn_in limit=1: 2nd inbound TCP REJECTed via FORWARD" check_in_second_blocked
-		wait $FP2 2>/dev/null
-		wait $LP4 2>/dev/null
 	else
 		echo "(skipped: 2-namespace setup failed; not root or veth/netns missing)"
 	fi
@@ -490,34 +451,27 @@ else
 		eqos_update_bypass_set  "eqotest_sa" "" ""
 		eqos_add_conn "eqotest_sa[0]" "$SA_NS_A_IP" "1" "1" out
 
-		# Same counter-based probe as the 2-namespace section above. Reuses
-		# conn_rule_pkts helper.
-
-		# First conn occupies slot 1
-		( ip netns exec "$SA_NS_B" sh -c 'sleep 10 | nc -l -p 19300 > /dev/null 2>&1' ) &
-		SAP1=$!
-		sleep 2
-		( ip netns exec "$SA_NS_A" sh -c 'sleep 6 | nc -w 6 '"$SA_NS_B_IP"' 19300 > /dev/null 2>&1' ) &
-		SAF1=$!
-		sleep 2
+		# Same listener-less, two-SYN, counter-based probe as the 2-namespace
+		# section. busybox nc has no -l/-p/-w; just send two SYNs to ports
+		# with no listener, ns_b kernel RSTs both, conntrack entries persist
+		# in CLOSE state (~10s) long enough for connlimit-saddr count=2.
 
 		check_sa_blocked() {
 			iptables -Z eqos_forward 2>/dev/null
-			ip netns exec "$SA_NS_A" nc -w 1 "$SA_NS_B_IP" 19301 < /dev/null > /dev/null 2>&1
+			ip netns exec "$SA_NS_A" nc "$SA_NS_B_IP" 19300 </dev/null >/dev/null 2>&1
+			ip netns exec "$SA_NS_A" nc "$SA_NS_B_IP" 19301 </dev/null >/dev/null 2>&1
 			pkts=$(conn_rule_pkts "eqos:rule:eqotest_sa[0]")
 			[ -n "$pkts" ] && [ "$pkts" -gt 0 ] 2>/dev/null
 		}
 		assert "single-arm: 2nd TCP REJECTed (iifname=oifname=$SA_BR)" check_sa_blocked
-
-		wait $SAF1 2>/dev/null
-		wait $SAP1 2>/dev/null
 
 		# Quick sanity: lifting cap restores connectivity in the same hairpin
 		eqos_del_conn "eqotest_sa[0]"
 		eqos_add_conn "eqotest_sa[0]" "$SA_NS_A_IP" "1000" "1" out
 		check_sa_pass() {
 			iptables -Z eqos_forward 2>/dev/null
-			ip netns exec "$SA_NS_A" nc -w 1 "$SA_NS_B_IP" 19302 < /dev/null > /dev/null 2>&1
+			ip netns exec "$SA_NS_A" nc "$SA_NS_B_IP" 19302 </dev/null >/dev/null 2>&1
+			ip netns exec "$SA_NS_A" nc "$SA_NS_B_IP" 19303 </dev/null >/dev/null 2>&1
 			pkts=$(conn_rule_pkts "eqos:rule:eqotest_sa[0]")
 			[ "$pkts" = "0" ]
 		}

@@ -317,6 +317,13 @@ else
 		# the previous block was specifically the connlimit, not setup noise.
 		eqos_del_conn "eqotest_fwd[0]"
 		eqos_add_conn "eqotest_fwd[0]" "$FWD_NS_A_IP" "1000" "1" out
+		# Diag: dump eqos_forward state so we can tell if del actually removed
+		# the limit=1 rule. Two rules here → del-by-comment didn't match.
+		echo "  [pre-raised-cap state]"
+		case "$EQOS_BACKEND" in
+			iptables) iptables  -L eqos_forward --line-numbers -nv 2>/dev/null | sed 's/^/    /' ;;
+			nft)      nft list chain inet eqosplus forward 2>/dev/null | sed 's/^/    /' ;;
+		esac
 		( ip netns exec "$FWD_NS_B" sh -c '(echo EQOK; sleep 5) | nc -l -p 19202 2>/dev/null' ) &
 		LP3=$!
 		sleep 2
@@ -480,6 +487,11 @@ else
 		# Quick sanity: lifting cap restores connectivity in the same hairpin
 		eqos_del_conn "eqotest_sa[0]"
 		eqos_add_conn "eqotest_sa[0]" "$SA_NS_A_IP" "1000" "1" out
+		echo "  [pre-raised-cap state]"
+		case "$EQOS_BACKEND" in
+			iptables) iptables  -L eqos_forward --line-numbers -nv 2>/dev/null | sed 's/^/    /' ;;
+			nft)      nft list chain inet eqosplus forward 2>/dev/null | sed 's/^/    /' ;;
+		esac
 		( ip netns exec "$SA_NS_B" sh -c '(echo EQOK; sleep 5) | nc -l -p 19302 2>/dev/null' ) &
 		SAP3=$!
 		sleep 2

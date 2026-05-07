@@ -1,7 +1,7 @@
 module("luci.controller.eqosplus", package.seeall)
 -- Copyright 2022-2025 lava <byl0561@gmail.com>
 
-local allowed_pkgs = { ["kmod-dummy"] = true, ["kmod-veth"] = true, ["ip-full"] = true }
+local allowed_pkgs = { ["kmod-dummy"] = true, ["kmod-veth"] = true, ["ip-full"] = true, ["netcat"] = true }
 local TIMEOUT = "/usr/lib/eqosplus/timeout_exec"
 
 function index()

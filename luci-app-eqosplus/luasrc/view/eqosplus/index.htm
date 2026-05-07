@@ -890,9 +890,15 @@
 			'<%=luci.dispatcher.build_url("admin", "network", "eqosplus", "run_test")%>');
 	}
 
-	// --- Traffic test (ip-full, kmod-veth) ---
+	// --- Traffic test (ip-full, kmod-veth, netcat) ---
+	// netcat (GNU) is required for the conn_limit behavior tests: a real TCP
+	// listener inside ns_b + persistent client from ns_a establishes the
+	// ESTABLISHED conntrack entry that connlimit-saddr/daddr counts. busybox
+	// nc on stripped builds has no listen mode and a SYN+RST flow gets its
+	// conntrack entry killed immediately by the kernel — connlimit then
+	// always sees count=1 and never matches.
 	function runTrafficTest() {
-		runTestWithDeps('btn_traffic_test', 'ip-full,kmod-veth',
+		runTestWithDeps('btn_traffic_test', 'ip-full,kmod-veth,netcat',
 			'<%=luci.dispatcher.build_url("admin", "network", "eqosplus", "run_traffic_test")%>');
 	}
 //]]>

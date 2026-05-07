@@ -756,7 +756,7 @@ echo "-- Set difference (awk-based, used by sync_networks) --"
 # `NR==FNR` misfire when f1 is empty (FNR resets to 1 on f2 --> f1's block
 # runs against f2's first line, polluting b[])
 _setdiff() {
-  awk -v f1="$1" 'BEGIN{while((getline l<f1)>0)if(l!="")b[l]=1;close(f1)}$0!="" && !($0 in b)' "$2"
+	awk -v f1="$1" 'BEGIN{while((getline l<f1)>0)if(l!="")b[l]=1;close(f1)}$0!="" && !($0 in b)' "$2"
 }
 
 _test_setdiff_dir=$(mktemp -d "/tmp/eqosplus_test_setdiff.XXXXXX")

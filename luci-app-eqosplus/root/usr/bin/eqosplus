@@ -420,11 +420,11 @@ sync_networks() {
 	#   1. busybox `grep -Fxvf` may return empty on empty pattern files (vs GNU
 	#      returning data unchanged), silently breaking first-boot start.
 	#   2. The classic `NR==FNR{...;next}` two-file idiom misfires when file 1
-	#      is empty: wak skips straight to file 2 with NR=FNR=1, so the f1
+	#      is empty: awk skips straight to file 2 with NR=FNR=1, so the f1
 	#      block runs against f2's first line and pollutes b[]. Using BEGIN +
-  #      getline pre-loads f1 explicitly, no NR==FNR ambiguity.
+	#      getline pre-loads f1 explicitly, no NR==FNR ambiguity.
 	need_start=$(awk -v f1="$tmp_run" 'BEGIN{while((getline l<f1)>0)if(l!="")b[l]=1;close(f1)}$0!="" && !($0 in b)' "$tmp_all")
-	need_stop=$(awk  -v f1="$tmp_all" 'BEGIN{while((getline l<f1)>0)if(l!="")b[l]=1;close(f1)}$0!="" && !($0 in b)' "$tmp_run")
+	need_stop=$(awk -v f1="$tmp_all" 'BEGIN{while((getline l<f1)>0)if(l!="")b[l]=1;close(f1)}$0!="" && !($0 in b)' "$tmp_run")
 	rm -f "$tmp_all" "$tmp_run"
 
 	while IFS= read -r item; do

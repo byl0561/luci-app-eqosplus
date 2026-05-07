@@ -317,13 +317,30 @@ else
 		FP1=$!
 		sleep 2
 
+		# Diag: verify FP1 actually established. If not, conntrack has no
+		# src=ns_a entry, count=0+1=1, "above 1" is FALSE, REJECT never fires
+		# even when it should.
+		echo "  [diag pre-blocked] LP1 alive: $(kill -0 $LP1 2>/dev/null && echo yes || echo NO)"
+		echo "  [diag pre-blocked] FP1 alive: $(kill -0 $FP1 2>/dev/null && echo yes || echo NO)"
+		echo "  [diag pre-blocked] listeners in ns_b:"
+		ip netns exec "$FWD_NS_B" sh -c 'netstat -lnt 2>/dev/null || ss -lnt 2>/dev/null' \
+			| grep -E ':192[0-9][0-9]' | sed 's/^/    /'
+		echo "  [diag pre-blocked] conntrack entries from $FWD_NS_A_IP:"
+		grep -F "src=$FWD_NS_A_IP" /proc/net/nf_conntrack 2>/dev/null \
+			| awk '{print "    " $0}' | head -5
+
 		check_second_blocked() {
 			iptables -Z eqos_forward 2>/dev/null
+			iptables -Z FORWARD      2>/dev/null
 			ip netns exec "$FWD_NS_A" nc -w 1 "$FWD_NS_B_IP" 19201 < /dev/null > /dev/null 2>&1
 			pkts=$(conn_rule_pkts "eqos:rule:eqotest_fwd[0]")
 			[ -n "$pkts" ] && [ "$pkts" -gt 0 ] 2>/dev/null
 		}
 		assert "conn_out limit=1: 2nd concurrent TCP REJECTed via FORWARD" check_second_blocked
+		echo "  [diag post-blocked] FORWARD jump pkts (probe-only):"
+		iptables -L FORWARD --line-numbers -nv 2>/dev/null | head -8 | sed 's/^/    /'
+		echo "  [diag post-blocked] eqos_forward (probe-only):"
+		iptables -L eqos_forward --line-numbers -nv 2>/dev/null | sed 's/^/    /'
 
 		wait $FP1 2>/dev/null
 		wait $LP1 2>/dev/null

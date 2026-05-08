@@ -9,13 +9,53 @@ EOF
 
 [ -s /etc/config/eqosplus ] || echo "config eqosplus" > /etc/config/eqosplus
 
+# Ensure the [0] section exists so backend detection has somewhere to write
+uci -q get eqosplus.@eqosplus[0] >/dev/null 2>&1 || {
+	uci add eqosplus eqosplus >/dev/null
+	uci commit eqosplus
+}
+
+# Detect connection-limit backend once at install time.
+# Re-detect on every install (re-run by opkg) so a firewall switch is picked up.
+if   command -v nft      >/dev/null 2>&1; then _backend=nft
+elif command -v iptables >/dev/null 2>&1; then _backend=iptables
+else                                           _backend=none
+fi
+uci -q set "eqosplus.@eqosplus[0].backend=$_backend"
+uci commit eqosplus
+
 # Migrate legacy week='0' (everyday) to explicit day list for MultiValue widget
 _migrated=false
 for _sect in $(uci show eqosplus 2>/dev/null | grep "\.week='0'" | sed "s/\.week=.*//"); do
 	uci set "${_sect}.week=1,2,3,4,5,6,7"
 	_migrated=true
 done
+# Migrate prior single-direction conn_limit field to outbound (conn_out).
+# Inbound (conn_in) defaults to 0 — user opts in by editing the rule.
+for _sect in $(uci show eqosplus 2>/dev/null | grep "\.conn_limit=" | sed "s/\.conn_limit=.*//"); do
+	_val=$(uci -q get "${_sect}.conn_limit")
+	[ -n "$_val" ] && uci set "${_sect}.conn_out=${_val}"
+	uci -q delete "${_sect}.conn_limit"
+	_migrated=true
+done
 $_migrated && uci commit eqosplus
+
+# Register fw3 include only when running on iptables backend — fw4 doesn't
+# touch our independent inet/eqosplus table so no include is needed there.
+if [ "$_backend" = "iptables" ] && [ -x /usr/lib/eqosplus/fw3-include.sh ]; then
+	# Avoid duplicate registration
+	if ! uci -q show firewall 2>/dev/null | grep -qF "/usr/lib/eqosplus/fw3-include.sh"; then
+		uci -q add firewall include >/dev/null
+		uci -q set firewall.@include[-1].path='/usr/lib/eqosplus/fw3-include.sh'
+		# type=script is the default but pinning explicitly avoids
+		# silent fallback on older fw3 builds that demand it.
+		uci -q set firewall.@include[-1].type='script'
+		# reload=1 makes fw3 re-run our hook on `fw3 reload` too, not just
+		# on full restart (default).
+		uci -q set firewall.@include[-1].reload='1'
+		uci commit firewall
+	fi
+fi
 
 rm -f /tmp/luci-indexcache
 exit 0

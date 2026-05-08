@@ -7,23 +7,29 @@
 [id^="cbi-eqosplus-network_"] .cbi-section-table .placeholder td,
 [id^="cbi-eqosplus-network_"] .cbi-section-table .tr.placeholder .td { text-align: center; width: auto !important; }
 [id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(1),
-[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(1) { width: 5%; }   /* Enabled */
+[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(1)  { width: 4%; }   /* Enabled */
 [id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(2),
-[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(2) { width: 18%; }  /* IP/MAC */
+[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(2)  { width: 14%; }  /* IP/MAC */
 [id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(3),
-[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(3) { width: 10%; }  /* Download */
+[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(3)  { width: 7%; }   /* Download */
 [id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(4),
-[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(4) { width: 10%; }  /* Upload */
+[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(4)  { width: 7%; }   /* Upload */
 [id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(5),
-[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(5) { width: 9%; }   /* Start */
+[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(5)  { width: 6%; }   /* Conn In */
 [id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(6),
-[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(6) { width: 9%; }   /* End */
+[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(6)  { width: 6%; }   /* Conn Out */
 [id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(7),
-[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(7) { width: 14%; }  /* Schedule */
+[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(7)  { width: 5%; }   /* TCP only */
 [id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(8),
-[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(8) { width: 15%; }  /* Comment */
+[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(8)  { width: 7%; }   /* Start */
 [id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(9),
-[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(9) { width: 10%; }  /* Actions */
+[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(9)  { width: 7%; }   /* End */
+[id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(10),
+[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(10) { width: 11%; }  /* Schedule */
+[id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(11),
+[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(11) { width: 12%; }  /* Comment */
+[id^="cbi-eqosplus-network_"] .cbi-section-table th:nth-child(12),
+[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(12) { width: 14%; }  /* Actions */
 /* All form elements fill their cell */
 [id^="cbi-eqosplus-network_"] .cbi-section-table select,
 [id^="cbi-eqosplus-network_"] .cbi-section-table input[type="text"] {
@@ -51,28 +57,84 @@
 	font-size: 12px; padding: 4px 6px;
 }
 .eqos-multiselect-toggle::after { content: " \25BE"; opacity: 0.5; }
-/* Dropdown panel: reuse native cbi-dropdown[open] > ul.dropdown styling */
+/* Dropdown panel: themed via three-tier fallback so we look right on:
+   1. LuCI native themes (bootstrap, material) — use --background-color-low etc.
+   2. argon — falls back to argon's own --primary / --menu-bg-color etc.
+   3. Anything else without theme vars — uses hardcoded sane defaults
+   The bug being fixed: themes that don't define LuCI's standard vars
+   (e.g. argon doesn't) made the panel TRANSPARENT under the original code.
+   Border/box-shadow stay hardcoded #918e8c — that matches LuCI native. */
 .eqos-multiselect-dropdown {
 	display: none; position: absolute; z-index: 1100; left: 0; top: 100%;
-	background: var(--background-color-low); border: 1px solid #918e8c;
+	background: var(--background-color-low, var(--menu-bg-color, #ffffff));
+	color: var(--text-color-high, var(--main-menu-color, #1a1a1a));
+	border: 1px solid #918e8c;
 	box-shadow: 0 0 4px #918e8c;
 	min-width: 100%; white-space: nowrap;
 }
 .eqos-multiselect-item {
 	display: flex; align-items: center; gap: 6px;
 	padding: 5px 8px; cursor: pointer;
+	color: var(--text-color-high, var(--main-menu-color, #1a1a1a));
 }
-/* Item states: match native cbi-dropdown li states */
+/* Item states: same vars as native cbi-dropdown[open] > ul.dropdown > li,
+   with argon's --primary as second-tier fallback for selection accent. */
 .eqos-multiselect-item:hover {
-	background: var(--primary-color-low); color: var(--on-primary-color);
+	background: var(--primary-color-low, #e8f0fe);
+	color: var(--on-primary-color, #174ea6);
 }
 .eqos-multiselect-item:has(input:checked) {
-	background: var(--primary-color-medium); color: var(--on-primary-color);
+	background: var(--primary-color-medium, var(--primary, #1976d2));
+	color: var(--on-primary-color, #ffffff);
 }
 .eqos-multiselect-item:has(input:checked):hover {
-	background: linear-gradient(90deg, var(--primary-color-medium) 50%, var(--primary-color-low));
+	background: linear-gradient(90deg,
+		var(--primary-color-medium, var(--primary, #1976d2)) 50%,
+		var(--primary-color-low, #e8f0fe));
 }
 .eqos-multiselect-item input[type="checkbox"] { margin: 0; }
+/* Force label/span text inside items to inherit our item color so themes
+   that style .cbi-checkbox label can't make selected items unreadable. */
+.eqos-multiselect-item label,
+.eqos-multiselect-item span,
+.eqos-multiselect-item .cbi-checkbox { color: inherit; background: transparent; }
+
+/* Dark-mode fallback palette — kicks in for themes that don't define LuCI's
+   CSS vars but DO follow `prefers-color-scheme`. Notably argon (mode=normal):
+   argon's header.ut wraps its dark.css in `@media (prefers-color-scheme: dark)`
+   for normal mode, and simply emits it for forced-dark mode. Either path turns
+   the page background dark; without this block our white panel would be
+   jarringly bright on top.
+   Colors below match argon dark's palette (#252526 bg, #cccccc text,
+   #483d8b == --dark-primary for selection) so the dropdown blends in. */
+@media (prefers-color-scheme: dark) {
+	.eqos-multiselect-dropdown {
+		/* argon dark.css uses #252526 / #ffffff / #3c3c3c; we mirror those.
+		   When a theme defines --background-color-low etc., it still wins. */
+		background: var(--background-color-low, #252526);
+		color: var(--text-color-high, #cccccc);
+		border-color: #3c3c3c;
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+	}
+	.eqos-multiselect-item {
+		color: var(--text-color-high, #cccccc);
+	}
+	.eqos-multiselect-item:hover {
+		/* #3a3050 = argon --dark-primary (#483d8b) toned ~25% darker for hover */
+		background: var(--primary-color-low, #3a3050);
+		color: var(--on-primary-color, #ffffff);
+	}
+	.eqos-multiselect-item:has(input:checked) {
+		/* argon's --dark-primary is exactly #483d8b — selection blends in */
+		background: var(--primary-color-medium, var(--dark-primary, #483d8b));
+		color: var(--on-primary-color, #ffffff);
+	}
+	.eqos-multiselect-item:has(input:checked):hover {
+		background: linear-gradient(90deg,
+			var(--primary-color-medium, var(--dark-primary, #483d8b)) 50%,
+			var(--primary-color-low, #3a3050));
+	}
+}
 /* Use [open] attribute to match native cbi-dropdown focus/glow */
 .eqos-multiselect[open] .eqos-multiselect-dropdown { display: block; }
 </style>
@@ -333,7 +395,7 @@
 					// Switch to auto layout so colspan can span full width
 					tables[i].style.tableLayout = 'auto';
 					var td = placeholderRow.querySelector('td, .td');
-					if (td) td.setAttribute('colspan', '9');
+					if (td) td.setAttribute('colspan', '12');
 				} else {
 					// Data rows exist; clear override so CSS fixed layout applies
 					tables[i].style.tableLayout = '';
@@ -342,8 +404,8 @@
 		}
 		function initScheduleDropdowns() {
 			fixPlaceholders();
-			// Schedule is column 7 (nth-child(7)) in network tables
-			var tds = document.querySelectorAll('[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(7)');
+			// Schedule is column 10 (nth-child(10)) — after Conn In + Conn Out + TCP only
+			var tds = document.querySelectorAll('[id^="cbi-eqosplus-network_"] .cbi-section-table td:nth-child(10)');
 			for (var i = 0; i < tds.length; i++) buildDropdown(tds[i]);
 		}
 		initScheduleDropdowns();
@@ -367,6 +429,153 @@
 				if (!drops[i].contains(ev.target)) drops[i].removeAttribute('open');
 			}
 		});
+	})();
+	// --- MAC identifiers do not support connection limits ---
+	// When the target dropdown is a MAC address, force conn_in / conn_out
+	// to "0" and disable the inputs so the user can't type a non-zero value.
+	// Server-side validate (cbi/eqosplus.lua ip.validate) rejects MAC + non-zero
+	// conn_in/out as a defense in depth in case this JS is bypassed.
+	(function() {
+		var MAC_RE = /^[0-9a-fA-F]{2}([:\-][0-9a-fA-F]{2}){5}$/;
+
+		function readTargetValue(row) {
+			// Try cbi-dropdown widget first (the common rendering for Value
+			// with .value() options): selected <li> holds data-value, or a
+			// custom-input <li> nests an <input> for free-form entries.
+			var dd = row.querySelector('.cbi-dropdown[data-name$=".target"]');
+			if (dd) {
+				var sel = dd.querySelector('li[selected]');
+				if (sel) {
+					var v = sel.getAttribute('data-value');
+					if (v && v !== '-' && v !== '') return v;
+					var inp = sel.querySelector('input');
+					if (inp && inp.value) return inp.value;
+				}
+				var dv = dd.getAttribute('data-value');
+				if (dv) return dv;
+			}
+			// Fallback for plain <input> rendering (older LuCI builds).
+			var plain = row.querySelector('input[name$=".target"]');
+			return plain ? plain.value : '';
+		}
+
+		function findConnInputs(row) {
+			// Numeric inputs (conn_in / conn_out) — text type, readOnly works.
+			return [
+				row.querySelector('input[name$=".conn_in"]'),
+				row.querySelector('input[name$=".conn_out"]')
+			].filter(Boolean);
+		}
+		function findTcpOnlyInput(row) {
+			// LuCI Flag → <input type="checkbox">. readOnly is ignored on
+			// checkboxes by the browser, so we use pointer-events + tabIndex
+			// to lock interaction. Form submission of value=1 is preserved
+			// (we force checked=true when MAC is selected), so the saved
+			// state is always the default.
+			return row.querySelector('input[type="checkbox"][name$=".tcp_only"]');
+		}
+
+		function syncRow(row) {
+			var connInputs = findConnInputs(row);
+			var tcpOnly = findTcpOnlyInput(row);
+			if (!connInputs.length && !tcpOnly) return;
+			var isMac = MAC_RE.test(readTargetValue(row));
+			var msg = '<%=translate("MAC identifiers do not support connection limits")%>';
+
+			// Numeric conn inputs — readOnly + force "0" to clear stale UCI values.
+			// Disabled inputs are EXCLUDED from form submission per HTML spec,
+			// so write hook would never receive "0" and old CI/CO values would
+			// silently survive. readOnly keeps them submitted.
+			connInputs.forEach(function(inp) {
+				if (isMac) {
+					if (inp.value !== '0') inp.value = '0';
+					inp.readOnly = true;
+					inp.title = msg;
+					inp.style.opacity = '0.5';
+					inp.style.cursor = 'not-allowed';
+					inp.style.background = '#f0f0f0';
+				} else {
+					inp.readOnly = false;
+					inp.title = '';
+					inp.style.opacity = '';
+					inp.style.cursor = '';
+					inp.style.background = '';
+				}
+			});
+
+			// tcp_only checkbox — force to default ("1" = checked) and lock.
+			// Why not `disabled`: HTML excludes disabled inputs from form
+			// submission, but LuCI Flag emits a hidden fallback `<input
+			// type="hidden" value="0">` alongside the checkbox. With the
+			// checkbox disabled, only the hidden submits → UCI ends up
+			// with tcp_only=0 every time the user saves a MAC row, even
+			// though it's "irrelevant" for MAC. That dirties the data.
+			// pointer-events:none + force checked=true gives:
+			//   - checkbox visually checked + greyed
+			//   - checkbox value=1 still submits (wins over hidden value=0)
+			//   - UCI gets tcp_only=1 (matches default), consistent state
+			if (tcpOnly) {
+				if (isMac) {
+					if (!tcpOnly.checked) tcpOnly.checked = true;  // lock to default
+					tcpOnly.style.pointerEvents = 'none';
+					tcpOnly.style.opacity = '0.5';
+					tcpOnly.style.cursor = 'not-allowed';
+					tcpOnly.title = msg;
+					tcpOnly.tabIndex = -1;
+				} else {
+					tcpOnly.style.pointerEvents = '';
+					tcpOnly.style.opacity = '';
+					tcpOnly.style.cursor = '';
+					tcpOnly.title = '';
+					tcpOnly.tabIndex = 0;
+				}
+			}
+		}
+
+		function syncAll() {
+			var rows = document.querySelectorAll(
+				'[id^="cbi-eqosplus-network_"] .cbi-section-table tr, ' +
+				'[id^="cbi-eqosplus-network_"] .cbi-section-table .tr');
+			for (var i = 0; i < rows.length; i++) syncRow(rows[i]);
+		}
+
+		var map = document.querySelector('.cbi-map');
+		if (!map) return;
+
+		// Initial sync — must wait for CBI to render. Run multiple times to
+		// catch late renders.
+		syncAll();
+		window.addEventListener('load', function() { setTimeout(syncAll, 200); });
+
+		// Re-evaluate on any cbi-dropdown selection change. Delegated listener
+		// covers all rows; we filter to target-field events at the handler.
+		map.addEventListener('click', function(ev) {
+			// User picked an option in a dropdown
+			var li = ev.target.closest && ev.target.closest('li[data-value]');
+			if (!li) return;
+			var dd = li.closest('.cbi-dropdown[data-name$=".target"]');
+			if (!dd) return;
+			// LuCI updates `selected` asynchronously after click; defer.
+			setTimeout(function() {
+				var row = dd.closest('tr, .tr');
+				if (row) syncRow(row);
+			}, 0);
+		}, true);
+		map.addEventListener('input', function(ev) {
+			// User typed in the custom-input field of the target dropdown
+			if (!ev.target.matches('input')) return;
+			var dd = ev.target.closest('.cbi-dropdown[data-name$=".target"]');
+			if (!dd) return;
+			var row = dd.closest('tr, .tr');
+			if (row) syncRow(row);
+		}, true);
+
+		// Catch DOM rebuilds (LuCI re-renders sections after Add/Remove).
+		var _t = null;
+		new MutationObserver(function() {
+			if (_t) clearTimeout(_t);
+			_t = setTimeout(syncAll, 100);
+		}).observe(map, { childList: true, subtree: true });
 	})();
 	// --- Tab setup ---
 	(function() {
@@ -529,16 +738,66 @@
 	}
 	function _testDone(btn, out, origLabel, result) {
 		out.value = (result && result.output) || '<%=translate("No output")%>';
+		// Auto-scroll to the bottom so the final summary block (`Total: ...
+		// Pass: ... Fail: ...`) is in view — both test scripts call test_report
+		// at the very end and that's what users want to see first.
+		out.scrollTop = out.scrollHeight;
 		btn.value = origLabel;
 		_testRunning = false;
 		_setAllTestBtns(false);
 	}
 
+	// Module-level poll state. Switching from one test to another (e.g. user
+	// runs Structure Test then immediately Traffic Test) requires forcibly
+	// stopping the previous poll — otherwise BOTH pollers race and two
+	// different log files alternate-flicker into the same textarea, and the
+	// stale poll's _testDone calls keep flipping buttons back to "enabled"
+	// while the new test is still running.
+	var _testActivePoll = null;
+	var _testGen = 0;
+
+	function _stopActivePoll() {
+		if (_testActivePoll) {
+			try { XHR.stop(_testActivePoll); } catch (e) {}
+			_testActivePoll = null;
+		}
+	}
+
 	function doRunTest(btn, out, origLabel, testUrl) {
+		// Async pattern: start the test, then poll every 1s for progress.
+		// The backend writes test output to a tmp log; each poll returns the
+		// log so far + a "running" flag. uhttpd never sees a long request,
+		// so script_timeout (default 60s) doesn't cut us off mid-test.
+		_stopActivePoll();
+		var thisGen = ++_testGen;
+
 		btn.value = '<%=translate("Running...")%>';
 		out.value = '<%=translate("Running tests, please wait...")%>';
-		XHR.get(testUrl, null, function(x, r) {
-			_testDone(btn, out, origLabel, r);
+		var firstResp = true;
+		var pollFn = function(x, r) {
+			// Generation guard: an in-flight poll from an earlier test run
+			// would have a stale `thisGen` and silently bail out. Belt-and-
+			// suspenders against any edge case where XHR.stop didn't take.
+			if (thisGen !== _testGen) return;
+			if (r) {
+				if (r.output != null) {
+					out.value = r.output;
+					out.scrollTop = out.scrollHeight;
+				}
+				if (!r.running && !firstResp) {
+					try { XHR.stop(pollFn); } catch (e) {}
+					if (_testActivePoll === pollFn) _testActivePoll = null;
+					_testDone(btn, out, origLabel, r);
+				}
+				firstResp = false;
+			}
+		};
+		// Kick off the test (action=start), then start polling.
+		XHR.get(testUrl + '?action=start', null, function(x, r) {
+			if (thisGen !== _testGen) return;  // user already started another
+			pollFn(x, r);
+			_testActivePoll = pollFn;
+			XHR.poll(1, testUrl, null, pollFn);
 		});
 	}
 
@@ -631,9 +890,15 @@
 			'<%=luci.dispatcher.build_url("admin", "network", "eqosplus", "run_test")%>');
 	}
 
-	// --- Traffic test (ip-full, kmod-veth) ---
+	// --- Traffic test (ip-full, kmod-veth, netcat) ---
+	// netcat (GNU) is required for the conn_limit behavior tests: a real TCP
+	// listener inside ns_b + persistent client from ns_a establishes the
+	// ESTABLISHED conntrack entry that connlimit-saddr/daddr counts. busybox
+	// nc on stripped builds has no listen mode and a SYN+RST flow gets its
+	// conntrack entry killed immediately by the kernel — connlimit then
+	// always sees count=1 and never matches.
 	function runTrafficTest() {
-		runTestWithDeps('btn_traffic_test', 'ip-full,kmod-veth',
+		runTestWithDeps('btn_traffic_test', 'ip-full,kmod-veth,netcat',
 			'<%=luci.dispatcher.build_url("admin", "network", "eqosplus", "run_traffic_test")%>');
 	}
 //]]>

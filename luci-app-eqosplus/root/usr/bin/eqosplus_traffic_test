@@ -343,7 +343,7 @@ else
 		#      nf_conncount counts it
 		#   3. Send probe SYN → count = 1 (FP1) + 1 (probe NEW) = 2 → REJECT
 		#      fires for limit=1, not for limit=1000
-		#   4. Tear down FP1 (killall) before next eqos_del_conn
+		#   4. Tear down FP1 (pkill on specific cmdlines) before next eqos_del_conn
 
 		# helper: spawn FP1 listener+client, return after handshake completes
 		_fp1_up() {
@@ -353,9 +353,15 @@ else
 			ip netns exec "$FWD_NS_A" sh -c "(sleep 30) | netcat $FWD_NS_B_IP $cp" >/dev/null 2>&1 &
 			sleep 6  # netcat handshake takes ~5s on this build
 		}
+		# Use targeted pkill, NOT `killall sleep`. When invoked from LuCI the
+		# whole test runs under timeout_exec, whose watchdog has its own
+		# backgrounded `sleep <max_secs>`; a wide `killall sleep` snipes that
+		# watchdog, which then immediately fires `kill $test_pid` and the page
+		# log shows a stray "Killed" mid-test. `-fx "sleep 30"` matches the FP1
+		# keep-alive cmdline exactly (won't hit "sleep 300", "sleep 1", etc.).
 		_fp1_down() {
-			killall -9 netcat 2>/dev/null
-			killall -9 sleep 2>/dev/null
+			pkill -x  netcat     2>/dev/null
+			pkill -fx "sleep 30" 2>/dev/null
 			# Tiny grace period for kernel to clean up sockets before next test
 			sleep 1
 			conntrack -F 2>/dev/null
@@ -514,9 +520,11 @@ else
 			ip netns exec "$SA_NS_A" sh -c "(sleep 30) | netcat $SA_NS_B_IP 19300" >/dev/null 2>&1 &
 			sleep 6
 		}
+		# Targeted teardown — same rationale as _fp1_down (avoid sniping the
+		# timeout_exec watchdog's `sleep <max_secs>` when invoked from LuCI).
 		_sa_fp1_down() {
-			killall -9 netcat 2>/dev/null
-			killall -9 sleep 2>/dev/null
+			pkill -x  netcat     2>/dev/null
+			pkill -fx "sleep 30" 2>/dev/null
 			sleep 1
 			conntrack -F 2>/dev/null
 		}

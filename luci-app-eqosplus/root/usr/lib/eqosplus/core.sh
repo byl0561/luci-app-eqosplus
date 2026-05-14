@@ -417,19 +417,19 @@ _eqos_nft_purge_by_prefix() {
 # ---- iptables backend ------------------------------------------------------
 
 eqos_init_conn_table_ipt() {
-	iptables  -nL eqos_forward >/dev/null 2>&1 || iptables  -N eqos_forward 2>/dev/null
-	ip6tables -nL eqos_forward >/dev/null 2>&1 || ip6tables -N eqos_forward 2>/dev/null
-	iptables  -C FORWARD -j eqos_forward 2>/dev/null || iptables  -I FORWARD 1 -j eqos_forward 2>/dev/null
-	ip6tables -C FORWARD -j eqos_forward 2>/dev/null || ip6tables -I FORWARD 1 -j eqos_forward 2>/dev/null
+	iptables  -w 5 -nL eqos_forward >/dev/null 2>&1 || iptables  -w 5 -N eqos_forward 2>/dev/null
+	ip6tables -w 5 -nL eqos_forward >/dev/null 2>&1 || ip6tables -w 5 -N eqos_forward 2>/dev/null
+	iptables  -w 5 -C FORWARD -j eqos_forward 2>/dev/null || iptables  -w 5 -I FORWARD 1 -j eqos_forward 2>/dev/null
+	ip6tables -w 5 -C FORWARD -j eqos_forward 2>/dev/null || ip6tables -w 5 -I FORWARD 1 -j eqos_forward 2>/dev/null
 }
 
 eqos_teardown_conn_table_ipt() {
-	iptables  -D FORWARD -j eqos_forward 2>/dev/null
-	ip6tables -D FORWARD -j eqos_forward 2>/dev/null
-	iptables  -F eqos_forward 2>/dev/null
-	iptables  -X eqos_forward 2>/dev/null
-	ip6tables -F eqos_forward 2>/dev/null
-	ip6tables -X eqos_forward 2>/dev/null
+	iptables  -w 5 -D FORWARD -j eqos_forward 2>/dev/null
+	ip6tables -w 5 -D FORWARD -j eqos_forward 2>/dev/null
+	iptables  -w 5 -F eqos_forward 2>/dev/null
+	iptables  -w 5 -X eqos_forward 2>/dev/null
+	ip6tables -w 5 -F eqos_forward 2>/dev/null
+	ip6tables -w 5 -X eqos_forward 2>/dev/null
 	# Destroy any leftover ipsets
 	local s
 	for s in $(ipset list -name 2>/dev/null | grep '^eqos_bypass'); do
@@ -446,13 +446,13 @@ eqos_init_conn_network_ipt() {
 	ipset list "eqos_bypass6_${network}" >/dev/null 2>&1 || \
 		ipset create "eqos_bypass6_${network}" hash:net family inet6 2>/dev/null
 	# Bypass comment uses trailing ':' so prefix match anchored on it.
-	iptables -C eqos_forward -i "$dev" -m set --match-set "eqos_bypass4_${network}" dst \
+	iptables -w 5 -C eqos_forward -i "$dev" -m set --match-set "eqos_bypass4_${network}" dst \
 		-m comment --comment "eqos:bypass:${network}:" -j RETURN 2>/dev/null || \
-	iptables -I eqos_forward 1 -i "$dev" -m set --match-set "eqos_bypass4_${network}" dst \
+	iptables -w 5 -I eqos_forward 1 -i "$dev" -m set --match-set "eqos_bypass4_${network}" dst \
 		-m comment --comment "eqos:bypass:${network}:" -j RETURN 2>/dev/null
-	ip6tables -C eqos_forward -i "$dev" -m set --match-set "eqos_bypass6_${network}" dst \
+	ip6tables -w 5 -C eqos_forward -i "$dev" -m set --match-set "eqos_bypass6_${network}" dst \
 		-m comment --comment "eqos:bypass:${network}:" -j RETURN 2>/dev/null || \
-	ip6tables -I eqos_forward 1 -i "$dev" -m set --match-set "eqos_bypass6_${network}" dst \
+	ip6tables -w 5 -I eqos_forward 1 -i "$dev" -m set --match-set "eqos_bypass6_${network}" dst \
 		-m comment --comment "eqos:bypass:${network}:" -j RETURN 2>/dev/null
 }
 
@@ -511,11 +511,11 @@ eqos_add_conn_ipt() {
 		[ "$dir" = "out" ] || return 1
 		# Mask doesn't matter for a single MAC (one address).
 		# shellcheck disable=SC2086
-		iptables -A eqos_forward -m mac --mac-source "$addr" $proto_args \
+		iptables -w 5 -A eqos_forward -m mac --mac-source "$addr" $proto_args \
 			-m connlimit --connlimit-above "$limit" --connlimit-mask 32 $connlimit_side \
 			-m comment --comment "eqos:rule:${rule_id}" -j REJECT 2>/dev/null
 		# shellcheck disable=SC2086
-		ip6tables -A eqos_forward -m mac --mac-source "$addr" $proto_args \
+		ip6tables -w 5 -A eqos_forward -m mac --mac-source "$addr" $proto_args \
 			-m connlimit --connlimit-above "$limit" --connlimit-mask 128 $connlimit_side \
 			-m comment --comment "eqos:rule:${rule_id}" -j REJECT 2>/dev/null
 		return 0
@@ -539,12 +539,12 @@ eqos_add_conn_ipt() {
 
 	if [ "$is_v6" = "1" ]; then
 		# shellcheck disable=SC2086
-		ip6tables -A eqos_forward $addr_flag "$addr" $proto_args \
+		ip6tables -w 5 -A eqos_forward $addr_flag "$addr" $proto_args \
 			-m connlimit --connlimit-above "$limit" --connlimit-mask "$prefix" $connlimit_side \
 			-m comment --comment "eqos:rule:${rule_id}" -j REJECT 2>/dev/null
 	else
 		# shellcheck disable=SC2086
-		iptables -A eqos_forward $addr_flag "$addr" $proto_args \
+		iptables -w 5 -A eqos_forward $addr_flag "$addr" $proto_args \
 			-m connlimit --connlimit-above "$limit" --connlimit-mask "$prefix" $connlimit_side \
 			-m comment --comment "eqos:rule:${rule_id}" -j REJECT 2>/dev/null
 	fi
@@ -583,7 +583,7 @@ _eqos_ipt_delete_by_comment() {
 			}
 		' | sort -rn)
 		for ln in $lns; do
-			$cmd -D eqos_forward "$ln" 2>/dev/null
+			$cmd -w 5 -D eqos_forward "$ln" 2>/dev/null
 		done
 	done
 	return 0
@@ -606,7 +606,7 @@ _eqos_ipt_purge_by_prefix() {
 			}
 		' | sort -rn)
 		for ln in $lns; do
-			$cmd -D eqos_forward "$ln" 2>/dev/null
+			$cmd -w 5 -D eqos_forward "$ln" 2>/dev/null
 		done
 	done
 	return 0

@@ -187,7 +187,7 @@ fi
 conn_rule_pkts() {
 	case "$EQOS_BACKEND" in
 		iptables)
-			iptables-save -w 5 -c 2>/dev/null | awk -v c="$1" '
+			iptables-save -c 2>/dev/null | awk -v c="$1" '
 				/^\[/ && /-A eqos_forward / && index($0, c) {
 					s = substr($1, 2); split(s, a, ":"); print a[1]; exit
 				}

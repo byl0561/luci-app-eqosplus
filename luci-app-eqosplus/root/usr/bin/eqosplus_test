@@ -1073,8 +1073,8 @@ else
 				# variation. The `-- pattern` form is required because busybox
 				# grep parses leading `-A`/`--comment` as options otherwise
 				# (`-A N` for after-context, `--comment` as unknown long opt).
-				{ iptables-save  -w 5 2>/dev/null
-				  ip6tables-save -w 5 2>/dev/null; } \
+				{ iptables-save  2>/dev/null
+				  ip6tables-save 2>/dev/null; } \
 					| grep -F -- '-A eqos_forward' \
 					| grep -qF -- "--comment \"eqos:rule:$1\""
 				;;
@@ -1087,8 +1087,8 @@ else
 					| grep -qF "\"eqos:bypass:$1:\""
 				;;
 			iptables)
-				{ iptables-save  -w 5 2>/dev/null
-				  ip6tables-save -w 5 2>/dev/null; } \
+				{ iptables-save  2>/dev/null
+				  ip6tables-save 2>/dev/null; } \
 					| grep -F -- '-A eqos_forward' \
 					| grep -qF -- "--comment \"eqos:bypass:$1:\""
 				;;
@@ -1189,7 +1189,7 @@ else
 		# connlimit module differently across builds ("mask 24" / "#conn src/24"
 		# / sometimes not at all), so save-format is the reliable probe.
 		check_mask24() {
-			iptables-save -w 5 2>/dev/null | grep -F 'eqos_forward' | grep -qF 'connlimit-mask 24'
+			iptables-save 2>/dev/null | grep -F 'eqos_forward' | grep -qF 'connlimit-mask 24'
 		}
 		assert "conn: iptables CIDR /24 -> --connlimit-mask 24" check_mask24
 	fi

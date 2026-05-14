@@ -576,7 +576,12 @@ _eqos_ipt_delete_by_comment() {
 	local cmd save_cmd lns ln
 	for cmd in iptables ip6tables; do
 		save_cmd="${cmd}-save"
-		lns=$($save_cmd -w 5 2>/dev/null | awk -v c="$comment" '
+		# NOTE: iptables-save / ip6tables-save in iptables-legacy do NOT accept
+		# -w (option missing from their getopt string — adding it yields
+		# "unknown option" + exit non-zero + empty stdout). They also bypass
+		# xtables.lock entirely (read kernel state directly via libiptc),
+		# so the lock-wait concern doesn't apply to them. Plain invocation.
+		lns=$($save_cmd 2>/dev/null | awk -v c="$comment" '
 			/^-A eqos_forward / {
 				idx++
 				if (index($0, "--comment \"" c "\"")) print idx
@@ -599,7 +604,8 @@ _eqos_ipt_purge_by_prefix() {
 	local cmd save_cmd lns ln
 	for cmd in iptables ip6tables; do
 		save_cmd="${cmd}-save"
-		lns=$($save_cmd -w 5 2>/dev/null | awk -v p="$prefix" '
+		# See note in _eqos_ipt_delete_by_comment: -w not accepted by save.
+		lns=$($save_cmd 2>/dev/null | awk -v p="$prefix" '
 			/^-A eqos_forward / {
 				idx++
 				if (index($0, "--comment \"" p)) print idx

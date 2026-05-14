@@ -659,14 +659,27 @@ add_ip() {
 	fi
 
 	# Connection limit: clear once, then add per-direction.
+	# CRITICAL: Errors must propagate. If any conn rule fails to install,
+	# return without updating IDLIST so the daemon retries next 30s cycle.
+	# Silently writing IDLIST on partial failure permanently desyncs IDLIST
+	# from actual iptables state — daemon's idempotency check looks at IDLIST
+	# only, so a "ghost" entry will never trigger a retry.
 	eqos_del_conn "$1"
+	local _conn_failed=0
 	if [ "$CO" -gt 0 ]; then
-		eqos_add_conn "$1" "$ip_addr" "$CO" "$TO" out \
-			|| log_msg 1 "add_ip: eqos_add_conn out failed for $1"
+		eqos_add_conn "$1" "$ip_addr" "$CO" "$TO" out || {
+			log_msg 1 "add_ip: eqos_add_conn out failed for $1"
+			_conn_failed=1
+		}
 	fi
 	if [ "$CI" -gt 0 ]; then
-		eqos_add_conn "$1" "$ip_addr" "$CI" "$TO" in \
-			|| log_msg 1 "add_ip: eqos_add_conn in failed for $1"
+		eqos_add_conn "$1" "$ip_addr" "$CI" "$TO" in || {
+			log_msg 1 "add_ip: eqos_add_conn in failed for $1"
+			_conn_failed=1
+		}
+	fi
+	if [ "$_conn_failed" = 1 ]; then
+		return 1
 	fi
 
 	# Accumulate for batch flush if active, otherwise write immediately

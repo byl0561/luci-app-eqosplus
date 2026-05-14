@@ -78,10 +78,10 @@ idlistusr(){
 		# must be present for traffic to reach our REJECT rules. v4 and v6
 		# can be wiped independently (e.g. ip6tables-restore failure that
 		# left v4 alone), so each is probed separately.
-		iptables  -nL eqos_forward                  >/dev/null 2>&1 || _state_intact=0
-		ip6tables -nL eqos_forward                  >/dev/null 2>&1 || _state_intact=0
-		iptables  -C FORWARD -j eqos_forward        2>/dev/null     || _state_intact=0
-		ip6tables -C FORWARD -j eqos_forward        2>/dev/null     || _state_intact=0
+		iptables  -w 5 -nL eqos_forward                  >/dev/null 2>&1 || _state_intact=0
+		ip6tables -w 5 -nL eqos_forward                  >/dev/null 2>&1 || _state_intact=0
+		iptables  -w 5 -C FORWARD -j eqos_forward        2>/dev/null     || _state_intact=0
+		ip6tables -w 5 -C FORWARD -j eqos_forward        2>/dev/null     || _state_intact=0
 	fi
 	if [ "$_state_intact" = "0" ]; then
 		logger -t eqosplusctrl "conn state missing, triggering conn_reload"

@@ -1109,9 +1109,9 @@ else
 			nft list table inet eqosplus
 	else
 		assert "conn: iptables eqos_forward chain exists" \
-			iptables -nL eqos_forward
+			iptables -w 5 -nL eqos_forward
 		assert "conn: ip6tables eqos_forward chain exists" \
-			ip6tables -nL eqos_forward
+			ip6tables -w 5 -nL eqos_forward
 	fi
 
 	# Per-network bypass init (use synthetic network name "eqotest_a")

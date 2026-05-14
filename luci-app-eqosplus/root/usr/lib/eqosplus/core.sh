@@ -417,19 +417,19 @@ _eqos_nft_purge_by_prefix() {
 # ---- iptables backend ------------------------------------------------------
 
 eqos_init_conn_table_ipt() {
-	iptables  -nL eqos_forward >/dev/null 2>&1 || iptables  -N eqos_forward 2>/dev/null
-	ip6tables -nL eqos_forward >/dev/null 2>&1 || ip6tables -N eqos_forward 2>/dev/null
-	iptables  -C FORWARD -j eqos_forward 2>/dev/null || iptables  -I FORWARD 1 -j eqos_forward 2>/dev/null
-	ip6tables -C FORWARD -j eqos_forward 2>/dev/null || ip6tables -I FORWARD 1 -j eqos_forward 2>/dev/null
+	iptables  -w 5 -nL eqos_forward >/dev/null 2>&1 || iptables  -w 5 -N eqos_forward 2>/dev/null
+	ip6tables -w 5 -nL eqos_forward >/dev/null 2>&1 || ip6tables -w 5 -N eqos_forward 2>/dev/null
+	iptables  -w 5 -C FORWARD -j eqos_forward 2>/dev/null || iptables  -w 5 -I FORWARD 1 -j eqos_forward 2>/dev/null
+	ip6tables -w 5 -C FORWARD -j eqos_forward 2>/dev/null || ip6tables -w 5 -I FORWARD 1 -j eqos_forward 2>/dev/null
 }
 
 eqos_teardown_conn_table_ipt() {
-	iptables  -D FORWARD -j eqos_forward 2>/dev/null
-	ip6tables -D FORWARD -j eqos_forward 2>/dev/null
-	iptables  -F eqos_forward 2>/dev/null
-	iptables  -X eqos_forward 2>/dev/null
-	ip6tables -F eqos_forward 2>/dev/null
-	ip6tables -X eqos_forward 2>/dev/null
+	iptables  -w 5 -D FORWARD -j eqos_forward 2>/dev/null
+	ip6tables -w 5 -D FORWARD -j eqos_forward 2>/dev/null
+	iptables  -w 5 -F eqos_forward 2>/dev/null
+	iptables  -w 5 -X eqos_forward 2>/dev/null
+	ip6tables -w 5 -F eqos_forward 2>/dev/null
+	ip6tables -w 5 -X eqos_forward 2>/dev/null
 	# Destroy any leftover ipsets
 	local s
 	for s in $(ipset list -name 2>/dev/null | grep '^eqos_bypass'); do
@@ -446,13 +446,13 @@ eqos_init_conn_network_ipt() {
 	ipset list "eqos_bypass6_${network}" >/dev/null 2>&1 || \
 		ipset create "eqos_bypass6_${network}" hash:net family inet6 2>/dev/null
 	# Bypass comment uses trailing ':' so prefix match anchored on it.
-	iptables -C eqos_forward -i "$dev" -m set --match-set "eqos_bypass4_${network}" dst \
+	iptables -w 5 -C eqos_forward -i "$dev" -m set --match-set "eqos_bypass4_${network}" dst \
 		-m comment --comment "eqos:bypass:${network}:" -j RETURN 2>/dev/null || \
-	iptables -I eqos_forward 1 -i "$dev" -m set --match-set "eqos_bypass4_${network}" dst \
+	iptables -w 5 -I eqos_forward 1 -i "$dev" -m set --match-set "eqos_bypass4_${network}" dst \
 		-m comment --comment "eqos:bypass:${network}:" -j RETURN 2>/dev/null
-	ip6tables -C eqos_forward -i "$dev" -m set --match-set "eqos_bypass6_${network}" dst \
+	ip6tables -w 5 -C eqos_forward -i "$dev" -m set --match-set "eqos_bypass6_${network}" dst \
 		-m comment --comment "eqos:bypass:${network}:" -j RETURN 2>/dev/null || \
-	ip6tables -I eqos_forward 1 -i "$dev" -m set --match-set "eqos_bypass6_${network}" dst \
+	ip6tables -w 5 -I eqos_forward 1 -i "$dev" -m set --match-set "eqos_bypass6_${network}" dst \
 		-m comment --comment "eqos:bypass:${network}:" -j RETURN 2>/dev/null
 }
 
@@ -511,11 +511,11 @@ eqos_add_conn_ipt() {
 		[ "$dir" = "out" ] || return 1
 		# Mask doesn't matter for a single MAC (one address).
 		# shellcheck disable=SC2086
-		iptables -A eqos_forward -m mac --mac-source "$addr" $proto_args \
+		iptables -w 5 -A eqos_forward -m mac --mac-source "$addr" $proto_args \
 			-m connlimit --connlimit-above "$limit" --connlimit-mask 32 $connlimit_side \
 			-m comment --comment "eqos:rule:${rule_id}" -j REJECT 2>/dev/null
 		# shellcheck disable=SC2086
-		ip6tables -A eqos_forward -m mac --mac-source "$addr" $proto_args \
+		ip6tables -w 5 -A eqos_forward -m mac --mac-source "$addr" $proto_args \
 			-m connlimit --connlimit-above "$limit" --connlimit-mask 128 $connlimit_side \
 			-m comment --comment "eqos:rule:${rule_id}" -j REJECT 2>/dev/null
 		return 0
@@ -539,12 +539,12 @@ eqos_add_conn_ipt() {
 
 	if [ "$is_v6" = "1" ]; then
 		# shellcheck disable=SC2086
-		ip6tables -A eqos_forward $addr_flag "$addr" $proto_args \
+		ip6tables -w 5 -A eqos_forward $addr_flag "$addr" $proto_args \
 			-m connlimit --connlimit-above "$limit" --connlimit-mask "$prefix" $connlimit_side \
 			-m comment --comment "eqos:rule:${rule_id}" -j REJECT 2>/dev/null
 	else
 		# shellcheck disable=SC2086
-		iptables -A eqos_forward $addr_flag "$addr" $proto_args \
+		iptables -w 5 -A eqos_forward $addr_flag "$addr" $proto_args \
 			-m connlimit --connlimit-above "$limit" --connlimit-mask "$prefix" $connlimit_side \
 			-m comment --comment "eqos:rule:${rule_id}" -j REJECT 2>/dev/null
 	fi
@@ -564,6 +564,32 @@ eqos_purge_conn_for_network_ipt() {
 	_eqos_ipt_purge_by_prefix "eqos:rule:${network}["
 }
 
+# Run iptables-save / ip6tables-save with retry on transient empty output.
+# Why retry: iptables-save makes TWO getsockopt calls (SO_GET_INFO, then
+# SO_GET_ENTRIES). If another process commits a rule change between them,
+# the kernel RCU-swaps the table and the second call returns -EAGAIN due
+# to size mismatch. libiptc-legacy does NOT retry — empty stdout silently
+# breaks any caller piping through awk/grep, causing missed deletions and
+# accumulating duplicate rules over time.
+# Note: -w is NOT a valid flag for iptables-save in iptables-legacy (not
+# in its getopt string). iptables-save bypasses xtables.lock entirely.
+# Tuning: race window is typically microseconds; 3 tries × 50ms backoff
+# tolerates concurrent committers (openclash, miniupnpd) without masking
+# real failures (e.g. missing kernel module, ENOENT).
+_eqos_ipt_save_retry() {
+	local cmd=$1 out rc _try
+	for _try in 1 2 3; do
+		out=$("$cmd" 2>/dev/null)
+		rc=$?
+		if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
+			printf '%s\n' "$out"
+			return 0
+		fi
+		[ "$_try" -lt 3 ] && sleep 0.05 2>/dev/null
+	done
+	return 1
+}
+
 # Delete rules whose comment EXACTLY equals $1.
 # We use iptables-save (stable, machine-readable output) instead of iptables -L
 # because -L's rendering of -m comment varies across builds: some show
@@ -576,14 +602,14 @@ _eqos_ipt_delete_by_comment() {
 	local cmd save_cmd lns ln
 	for cmd in iptables ip6tables; do
 		save_cmd="${cmd}-save"
-		lns=$($save_cmd 2>/dev/null | awk -v c="$comment" '
+		lns=$(_eqos_ipt_save_retry "$save_cmd" | awk -v c="$comment" '
 			/^-A eqos_forward / {
 				idx++
 				if (index($0, "--comment \"" c "\"")) print idx
 			}
 		' | sort -rn)
 		for ln in $lns; do
-			$cmd -D eqos_forward "$ln" 2>/dev/null
+			$cmd -w 5 -D eqos_forward "$ln" 2>/dev/null
 		done
 	done
 	return 0
@@ -599,14 +625,14 @@ _eqos_ipt_purge_by_prefix() {
 	local cmd save_cmd lns ln
 	for cmd in iptables ip6tables; do
 		save_cmd="${cmd}-save"
-		lns=$($save_cmd 2>/dev/null | awk -v p="$prefix" '
+		lns=$(_eqos_ipt_save_retry "$save_cmd" | awk -v p="$prefix" '
 			/^-A eqos_forward / {
 				idx++
 				if (index($0, "--comment \"" p)) print idx
 			}
 		' | sort -rn)
 		for ln in $lns; do
-			$cmd -D eqos_forward "$ln" 2>/dev/null
+			$cmd -w 5 -D eqos_forward "$ln" 2>/dev/null
 		done
 	done
 	return 0

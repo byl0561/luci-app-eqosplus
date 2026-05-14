@@ -247,8 +247,8 @@ cleanup_fwd() {
 		done
 	fi
 	# Remove fw3/iptables holes by exact match
-	iptables -D FORWARD -i "$FWD_VHA" -o "$FWD_VHB" -j ACCEPT 2>/dev/null
-	iptables -D FORWARD -i "$FWD_VHB" -o "$FWD_VHA" -j ACCEPT 2>/dev/null
+	iptables -w 5 -D FORWARD -i "$FWD_VHA" -o "$FWD_VHB" -j ACCEPT 2>/dev/null
+	iptables -w 5 -D FORWARD -i "$FWD_VHB" -o "$FWD_VHA" -j ACCEPT 2>/dev/null
 	# Always nuke namespaces and veths (idempotent — silently no-op if absent)
 	ip netns del "$FWD_NS_A" 2>/dev/null
 	ip netns del "$FWD_NS_B" 2>/dev/null
@@ -299,8 +299,8 @@ else
 			h2=$(nft -a -e insert rule inet fw4 forward iifname "$FWD_VHB" oifname "$FWD_VHA" accept 2>/dev/null | awk '/handle/{print $NF}')
 			FWD_FW_HANDLES="$h1 $h2"
 		else
-			iptables -I FORWARD -i "$FWD_VHA" -o "$FWD_VHB" -j ACCEPT 2>/dev/null
-			iptables -I FORWARD -i "$FWD_VHB" -o "$FWD_VHA" -j ACCEPT 2>/dev/null
+			iptables -w 5 -I FORWARD -i "$FWD_VHA" -o "$FWD_VHB" -j ACCEPT 2>/dev/null
+			iptables -w 5 -I FORWARD -i "$FWD_VHB" -o "$FWD_VHA" -j ACCEPT 2>/dev/null
 		fi
 
 		FWD_SETUP_OK=1
@@ -322,10 +322,10 @@ else
 		# nft backend has its own independent table at priority -10, no
 		# ordering interaction with fw4's main forward chain — skip there.
 		if [ "$EQOS_BACKEND" = "iptables" ]; then
-			iptables  -D FORWARD -j eqos_forward 2>/dev/null
-			iptables  -I FORWARD 1 -j eqos_forward
-			ip6tables -D FORWARD -j eqos_forward 2>/dev/null
-			ip6tables -I FORWARD 1 -j eqos_forward
+			iptables  -w 5 -D FORWARD -j eqos_forward 2>/dev/null
+			iptables  -w 5 -I FORWARD 1 -j eqos_forward
+			ip6tables -w 5 -D FORWARD -j eqos_forward 2>/dev/null
+			ip6tables -w 5 -I FORWARD 1 -j eqos_forward
 		fi
 		eqos_init_conn_network "eqotest_fwd" "$FWD_VHA"
 		eqos_update_bypass_set  "eqotest_fwd" "" ""
@@ -441,7 +441,7 @@ cleanup_sa() {
 			nft delete rule inet fw4 forward handle "$h" 2>/dev/null
 		done
 	fi
-	iptables -D FORWARD -i "$SA_BR" -o "$SA_BR" -j ACCEPT 2>/dev/null
+	iptables -w 5 -D FORWARD -i "$SA_BR" -o "$SA_BR" -j ACCEPT 2>/dev/null
 	ip netns del "$SA_NS_A" 2>/dev/null
 	ip netns del "$SA_NS_B" 2>/dev/null
 	ip link del "$SA_VHA" 2>/dev/null
@@ -490,7 +490,7 @@ else
 			h=$(nft -a -e insert rule inet fw4 forward iifname "$SA_BR" oifname "$SA_BR" accept 2>/dev/null | awk '/handle/{print $NF}')
 			SA_FW_HANDLES="$h"
 		else
-			iptables -I FORWARD -i "$SA_BR" -o "$SA_BR" -j ACCEPT 2>/dev/null
+			iptables -w 5 -I FORWARD -i "$SA_BR" -o "$SA_BR" -j ACCEPT 2>/dev/null
 		fi
 		SA_SETUP_OK=1
 	fi
@@ -505,10 +505,10 @@ else
 		# iptables ordering fix — see same block in the 2-namespace section
 		# above for rationale (force jump above test ACCEPT in main FORWARD).
 		if [ "$EQOS_BACKEND" = "iptables" ]; then
-			iptables  -D FORWARD -j eqos_forward 2>/dev/null
-			iptables  -I FORWARD 1 -j eqos_forward
-			ip6tables -D FORWARD -j eqos_forward 2>/dev/null
-			ip6tables -I FORWARD 1 -j eqos_forward
+			iptables  -w 5 -D FORWARD -j eqos_forward 2>/dev/null
+			iptables  -w 5 -I FORWARD 1 -j eqos_forward
+			ip6tables -w 5 -D FORWARD -j eqos_forward 2>/dev/null
+			ip6tables -w 5 -I FORWARD 1 -j eqos_forward
 		fi
 		eqos_init_conn_network "eqotest_sa" "$SA_BR"
 		eqos_update_bypass_set  "eqotest_sa" "" ""

@@ -576,7 +576,7 @@ _eqos_ipt_delete_by_comment() {
 	local cmd save_cmd lns ln
 	for cmd in iptables ip6tables; do
 		save_cmd="${cmd}-save"
-		lns=$($save_cmd 2>/dev/null | awk -v c="$comment" '
+		lns=$($save_cmd -w 5 2>/dev/null | awk -v c="$comment" '
 			/^-A eqos_forward / {
 				idx++
 				if (index($0, "--comment \"" c "\"")) print idx
@@ -599,7 +599,7 @@ _eqos_ipt_purge_by_prefix() {
 	local cmd save_cmd lns ln
 	for cmd in iptables ip6tables; do
 		save_cmd="${cmd}-save"
-		lns=$($save_cmd 2>/dev/null | awk -v p="$prefix" '
+		lns=$($save_cmd -w 5 2>/dev/null | awk -v p="$prefix" '
 			/^-A eqos_forward / {
 				idx++
 				if (index($0, "--comment \"" p)) print idx

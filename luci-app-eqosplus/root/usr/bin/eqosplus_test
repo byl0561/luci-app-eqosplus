@@ -212,6 +212,64 @@ eqos_del_id "$TEST_DEV" "1104"
 PATTERN="1:1104"
 assert_fail "eqos_del_id CIDR (class removed)" tc_has class show dev $TEST_DEV
 
+echo ""
+echo "-- eqos_del_id: verified filter cleanup + same-IP shadow guard --"
+
+# eqos_del_id must remove the FILTERS at all three locations, not just the
+# class. A residual filter at this pref is what shadows a different-id
+# rule for the SAME IP (tc evaluates filters by ascending pref and stops
+# at first match), so a leftover lower pref steals traffic into the
+# wrong/looser class. The old test only checked class removal.
+fresh_init
+eqos_add_ip "$TEST_DEV" "1700" "$TEST_IP" "8000" "4000"
+PATTERN="pref 1700 "
+assert "del_id pre: download filter present" \
+	tc_has filter show dev $TEST_DEV parent 1:0
+assert "del_id pre: ingress-redirect filter present" \
+	tc_has filter show dev $TEST_DEV parent ffff:
+assert "del_id pre: ifb classify filter present" \
+	tc_has filter show dev $TEST_IFB parent 1:0
+
+assert "eqos_del_id returns 0 on a clean delete" \
+	eqos_del_id "$TEST_DEV" "1700"
+PATTERN="pref 1700 "
+assert_fail "del_id: download filter removed" \
+	tc_has filter show dev $TEST_DEV parent 1:0
+assert_fail "del_id: ingress-redirect filter removed" \
+	tc_has filter show dev $TEST_DEV parent ffff:
+assert_fail "del_id: ifb classify filter removed" \
+	tc_has filter show dev $TEST_IFB parent 1:0
+PATTERN="1:1700"
+assert_fail "del_id: class removed" tc_has class show dev $TEST_DEV
+assert "eqos_del_id idempotent (already absent -> 0)" \
+	eqos_del_id "$TEST_DEV" "1700"
+
+# Same IP, two different rule_ids (the production lan[0]/lan[1] scheduled-
+# swap shape): deleting A must fully clear A's filters while B's stay
+# intact — otherwise A's stale lower pref shadows B for that IP.
+fresh_init
+eqos_add_ip "$TEST_DEV" "1700" "$TEST_IP" "8000" "4000"
+eqos_add_ip "$TEST_DEV" "1701" "$TEST_IP" "8000" "4000"
+eqos_del_id "$TEST_DEV" "1700"
+PATTERN="pref 1700 "
+assert_fail "shadow: A download filter gone" \
+	tc_has filter show dev $TEST_DEV parent 1:0
+assert_fail "shadow: A ingress-redirect filter gone" \
+	tc_has filter show dev $TEST_DEV parent ffff:
+assert_fail "shadow: A ifb filter gone" \
+	tc_has filter show dev $TEST_IFB parent 1:0
+PATTERN="pref 1701 "
+assert "shadow: B download filter intact" \
+	tc_has filter show dev $TEST_DEV parent 1:0
+assert "shadow: B ingress-redirect filter intact" \
+	tc_has filter show dev $TEST_DEV parent ffff:
+assert "shadow: B ifb filter intact" \
+	tc_has filter show dev $TEST_IFB parent 1:0
+PATTERN="1:1700"
+assert_fail "shadow: A class gone" tc_has class show dev $TEST_DEV
+PATTERN="1:1701"
+assert "shadow: B class intact" tc_has class show dev $TEST_DEV
+
 # Teardown
 eqos_teardown_dev "$TEST_DEV"
 PATTERN="htb"
@@ -1094,6 +1152,24 @@ else
 				;;
 		esac
 	}
+	# Count REJECT lines carrying comment "eqos:rule:<rule_id>" across both
+	# families. Lets us assert "exactly one" — conn_has_rule_id only proves
+	# presence and would miss a duplicate (the bug this release fixes).
+	conn_rule_count() {
+		case "$EQOS_BACKEND" in
+			nft)
+				nft list chain inet eqosplus forward 2>/dev/null \
+					| grep -cF "\"eqos:rule:$1\""
+				;;
+			iptables)
+				{ iptables-save  2>/dev/null
+				  ip6tables-save 2>/dev/null; } \
+					| grep -F -- '-A eqos_forward' \
+					| grep -cF -- "--comment \"eqos:rule:$1\""
+				;;
+		esac
+	}
+	conn_count_is() { [ "$(conn_rule_count "$1")" = "$2" ]; }
 
 	# Sweep any leftover test state from a prior crashed test run.
 	# Must NOT flush the whole table — production rules (lan/guest/...) live
@@ -1166,8 +1242,11 @@ else
 	assert_fail "conn: primitive rejects MAC+in (FORWARD-time L2 daddr unmatchable)" \
 		eqos_add_conn "eqotest_a[4]" "02:00:00:00:55:02" "10" "1" in
 
-	# Empty address must return non-zero (not silently install garbage). This
-	# guards _reapply_conn_for_active_rules' empty-addr skip path.
+	# Empty address must return non-zero (not silently install garbage).
+	# _reapply_conn_for_active_rules now purges all eqos:rule:* up front and
+	# then skips empty-addr / MAC IDLIST entries (no per-rule add), so this
+	# primitive-level rejection is the last guard against a stray empty-addr
+	# add leaking a rule during a rebuild.
 	assert_fail "conn: primitive rejects empty addr" \
 		eqos_add_conn "eqotest_a[empty]" "" "10" "1" out
 	assert_fail "conn: empty-addr did not leak a rule" \
@@ -1206,6 +1285,24 @@ else
 	if conn_has_rule_id "eqotest_a[0]extra"; then
 		eqos_del_conn "eqotest_a[0]extra"
 	fi
+
+	# Delete must remove ALL matching lines and report success — the
+	# release fix made eqos_del_conn verify the comment is gone and return
+	# non-zero otherwise (a missed delete previously got an add stacked on
+	# top -> duplicate REJECT). Force two identical lines, then one delete
+	# must clear both and a re-delete on the now-absent id is idempotent
+	# (verified clean -> returns 0). Scoped to eqotest_a[7]: never touches
+	# production conn rules sharing this table.
+	eqos_add_conn "eqotest_a[7]" "172.31.255.70" "100" "1" out
+	eqos_add_conn "eqotest_a[7]" "172.31.255.70" "100" "1" out
+	assert "conn: two raw adds produce 2 lines (dup precondition)" \
+		conn_count_is "eqotest_a[7]" 2
+	assert "conn: eqos_del_conn returns 0 after clearing dup" \
+		eqos_del_conn "eqotest_a[7]"
+	assert "conn: del removed BOTH duplicate lines" \
+		conn_count_is "eqotest_a[7]" 0
+	assert "conn: eqos_del_conn idempotent (verified-absent -> 0)" \
+		eqos_del_conn "eqotest_a[7]"
 
 	# Per-network sweep: install a rule for a similarly-named network, ensure
 	# purging "eqotest_a" doesn't touch "eqotest_b".

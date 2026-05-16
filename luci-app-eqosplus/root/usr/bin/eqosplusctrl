@@ -16,6 +16,24 @@ cached_idlist=""
 . /usr/lib/eqosplus/uci_helpers.sh
 . /usr/lib/eqosplus/sched.sh
 
+# Read-only ruleset probe. iptables-save does NOT take the xtables lock, so
+# it never blocks on contention (unlike `iptables -w 5 -nL/-C`, whose 5s
+# timeouts under miniupnpd/openclash churn produced spurious "conn state
+# missing" -> conn_reload storms). -t filter limits the dump to the only
+# table we care about (skips the huge nat table on UPnP-heavy boxes).
+# Kernel can still return EAGAIN on an RCU table swap, hence the short
+# retry; exhausted -> empty stdout + non-zero, and the caller treats an
+# unreadable dump as "unknown" (does NOT trigger a rebuild).
+_probe_save() {
+	local cmd=$1 out _t
+	for _t in 1 2 3; do
+		out=$($cmd -t filter 2>/dev/null)
+		[ $? -eq 0 ] && [ -n "$out" ] && { printf '%s\n' "$out"; return 0; }
+		sleep 0.1 2>/dev/null
+	done
+	return 1
+}
+
 # Rebuild schedule cache from UCI config (single uci show + two awk passes, minimal forks)
 rebuild_cache() {
 	local uci_dump
@@ -68,20 +86,28 @@ idlistusr(){
 	# We probe what's actually installed on the system (not the UCI-pinned
 	# backend) — a toolchain switch doesn't loop us into spurious reloads.
 	# Total cost: 1–4 forks (~5–20ms) per 30s cycle, ~0.07% CPU worst case.
-	local _state_intact=1
+	local _state_intact=1 _d
 	if   command -v nft      >/dev/null 2>&1; then
 		# nft path: independent table with its own hook registration; if the
 		# table is present, the chain is hooked and rules fire.
 		nft list table inet eqosplus >/dev/null 2>&1 || _state_intact=0
 	elif command -v iptables >/dev/null 2>&1; then
-		# iptables path: BOTH v4/v6 chains must exist AND BOTH FORWARD jumps
-		# must be present for traffic to reach our REJECT rules. v4 and v6
-		# can be wiped independently (e.g. ip6tables-restore failure that
-		# left v4 alone), so each is probed separately.
-		iptables  -w 5 -nL eqos_forward                  >/dev/null 2>&1 || _state_intact=0
-		ip6tables -w 5 -nL eqos_forward                  >/dev/null 2>&1 || _state_intact=0
-		iptables  -w 5 -C FORWARD -j eqos_forward        2>/dev/null     || _state_intact=0
-		ip6tables -w 5 -C FORWARD -j eqos_forward        2>/dev/null     || _state_intact=0
+		# iptables path: chain must exist AND the FORWARD jump must be
+		# present for traffic to reach our REJECT rules. v4 and v6 are
+		# probed independently (can be wiped separately). Read-only via
+		# *-save so a busy xtables lock can't make this falsely report
+		# "missing". Only flag missing when the dump was actually READ and
+		# the chain/jump is absent; an unreadable dump (transient EAGAIN,
+		# or no IPv6 stack) is "unknown" -> do NOT trigger a rebuild. Better
+		# to miss one cycle than self-feed the conn_reload storm.
+		if _d=$(_probe_save iptables-save); then
+			printf '%s\n' "$_d" | grep -q '^:eqos_forward '          || _state_intact=0
+			printf '%s\n' "$_d" | grep -q -- '-A FORWARD -j eqos_forward' || _state_intact=0
+		fi
+		if _d=$(_probe_save ip6tables-save); then
+			printf '%s\n' "$_d" | grep -q '^:eqos_forward '          || _state_intact=0
+			printf '%s\n' "$_d" | grep -q -- '-A FORWARD -j eqos_forward' || _state_intact=0
+		fi
 	fi
 	if [ "$_state_intact" = "0" ]; then
 		logger -t eqosplusctrl "conn state missing, triggering conn_reload"

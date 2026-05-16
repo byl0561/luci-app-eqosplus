@@ -1,5 +1,5 @@
 #!/bin/sh
-chmod +x  /etc/init.d/eqosplus /usr/bin/eqosplus*
+chmod +x  /etc/init.d/eqosplus /usr/bin/eqosplus* /usr/lib/eqosplus/fw3-include.sh
 uci -q batch <<-EOF >/dev/null
 	delete ucitrack.@eqosplus[-1]
 	add ucitrack eqosplus

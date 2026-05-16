@@ -178,21 +178,50 @@ eqos_add_ip() {
 	fi
 }
 
-# Delete a rate limit rule (both directions)
-# Usage: eqos_del_id <dev> <id>
-eqos_del_id() {
+# True (0) if ANY tc artifact for <dev>/<id> still exists. Checks all
+# three filter locations (not just classes): a residual filter at this
+# prio is what shadows a different-id rule for the SAME ip — tc evaluates
+# filters by ascending pref and stops at first match, so a stale lower
+# pref steals traffic into the wrong/looser class.
+_eqos_tc_residual() {
 	local dev=$1 id=$2
-	[ -n "$dev" ] && [ -n "$id" ] || return 1
+	$EQOS_TC_QUIET filter show dev "${dev}" parent ffff:  2>/dev/null | grep -q "pref ${id} " && return 0
+	$EQOS_TC_QUIET filter show dev "${dev}_ifb" parent 1:0 2>/dev/null | grep -q "pref ${id} " && return 0
+	$EQOS_TC_QUIET filter show dev "${dev}" parent 1:0    2>/dev/null | grep -q "pref ${id} " && return 0
+	$EQOS_TC_QUIET class show dev "${dev}" classid 1:"$id"     2>/dev/null | grep -q . && return 0
+	$EQOS_TC_QUIET class show dev "${dev}_ifb" classid 1:"$id" 2>/dev/null | grep -q . && return 0
+	return 1
+}
 
+_eqos_tc_del_once() {
+	local dev=$1 id=$2
 	$EQOS_TC_QUIET filter del dev "${dev}" parent ffff: prio "$id" 2>/dev/null
 	$EQOS_TC_QUIET filter del dev "${dev}_ifb" parent 1:0 prio "$id" 2>/dev/null
 	$EQOS_TC_QUIET filter del dev "${dev}" parent 1:0 prio "$id" 2>/dev/null
-
 	$EQOS_TC_QUIET qdisc del dev "${dev}" parent 1:"$id" 2>/dev/null
 	$EQOS_TC_QUIET qdisc del dev "${dev}_ifb" parent 1:"$id" 2>/dev/null
-
 	$EQOS_TC_QUIET class del dev "${dev}" parent 1:1 classid 1:"$id" 2>/dev/null
 	$EQOS_TC_QUIET class del dev "${dev}_ifb" parent 1:1 classid 1:"$id" 2>/dev/null
+}
+
+# Delete a rate limit rule (both directions) and VERIFY it is gone.
+# Usage: eqos_del_id <dev> <id>
+# Contract (relied on by del_id / add_ip / add_mac): return 0 = artifacts
+# for <id> are CONFIRMED ABSENT (deleted now, or already absent);
+# return 1 = still present after retries (netlink contention). tc del exit
+# codes are deliberately NOT used to judge success — they are non-zero
+# whenever there was nothing to delete, which is the normal case for the
+# preemptive cleanup add_ip/add_mac do before adding.
+eqos_del_id() {
+	local dev=$1 id=$2 _try
+	[ -n "$dev" ] && [ -n "$id" ] || return 1
+	for _try in 1 2 3; do
+		_eqos_tc_del_once "$dev" "$id"
+		_eqos_tc_residual "$dev" "$id" || return 0
+		[ "$_try" -lt 3 ] && sleep 0.1 2>/dev/null
+	done
+	logger -t eqosplus "WARN tc artifacts for id $id on $dev still present after del+retry" 2>/dev/null
+	return 1
 }
 
 # Verify that tc resources for an id have been fully cleaned up after eqos_del_id.
@@ -385,16 +414,28 @@ eqos_purge_conn_for_network_nft() {
 }
 
 # Delete all rules whose comment EXACTLY equals $1 (anchored by nft's quote).
+# nft has no iptables-legacy two-syscall RCU race, so an unreadable
+# `nft list` almost always means the table/chain is absent (nothing to
+# delete, no duplicate risk) -> treat as success. A POSITIVE residual
+# after deleting handles IS a failure (surfaced so callers don't add a
+# duplicate), symmetric with the iptables path.
 _eqos_nft_delete_by_comment() {
 	local comment=$1
-	[ -n "$comment" ] || return
-	nft -a list chain inet eqosplus forward 2>/dev/null | awk -v c="\"${comment}\"" '
+	[ -n "$comment" ] || return 1
+	local dump
+	dump=$(nft -a list chain inet eqosplus forward 2>/dev/null) || return 0
+	printf '%s\n' "$dump" | awk -v c="\"${comment}\"" '
 		index($0, c) && match($0, /handle [0-9]+/) {
 			print substr($0, RSTART + 7, RLENGTH - 7)
 		}
 	' | while read -r handle; do
 		[ -n "$handle" ] && nft delete rule inet eqosplus forward handle "$handle" 2>/dev/null
 	done
+	dump=$(nft -a list chain inet eqosplus forward 2>/dev/null) || return 0
+	if printf '%s\n' "$dump" | grep -qF -- "\"${comment}\""; then
+		logger -t eqosplus "WARN residual '$comment' in nft eqos forward after delete" 2>/dev/null
+		return 1
+	fi
 	return 0
 }
 
@@ -403,14 +444,21 @@ _eqos_nft_delete_by_comment() {
 # uniqueness — otherwise "lan" prefix would also match "lan2".
 _eqos_nft_purge_by_prefix() {
 	local prefix=$1
-	[ -n "$prefix" ] || return
-	nft -a list chain inet eqosplus forward 2>/dev/null | awk -v p="\"${prefix}" '
+	[ -n "$prefix" ] || return 1
+	local dump
+	dump=$(nft -a list chain inet eqosplus forward 2>/dev/null) || return 0
+	printf '%s\n' "$dump" | awk -v p="\"${prefix}" '
 		index($0, p) && match($0, /handle [0-9]+/) {
 			print substr($0, RSTART + 7, RLENGTH - 7)
 		}
 	' | while read -r handle; do
 		[ -n "$handle" ] && nft delete rule inet eqosplus forward handle "$handle" 2>/dev/null
 	done
+	dump=$(nft -a list chain inet eqosplus forward 2>/dev/null) || return 0
+	if printf '%s\n' "$dump" | grep -qF -- "\"${prefix}"; then
+		logger -t eqosplus "WARN residual prefix '$prefix' in nft eqos forward after purge" 2>/dev/null
+		return 1
+	fi
 	return 0
 }
 
@@ -423,18 +471,56 @@ eqos_init_conn_table_ipt() {
 	ip6tables -w 5 -C FORWARD -j eqos_forward 2>/dev/null || ip6tables -w 5 -I FORWARD 1 -j eqos_forward 2>/dev/null
 }
 
+# Flush one family's eqos_forward and VERIFY it is actually empty, retrying
+# on transient lock contention. Without this, a -F that lost the xtables
+# lock left a dirty chain that init then appended onto -> duplicate REJECTs.
+# $1 = iptables|ip6tables. v4 unverifiable-under-contention => fail (the
+# real bug); v6 unreadable tolerated (IPv4-only kernels).
+_eqos_ipt_flush_chain_verified() {
+	local cmd=$1 save_cmd="${1}-save" dump _try critical
+	[ "$cmd" = iptables ] && critical=1 || critical=0
+	for _try in 1 2 3; do
+		$cmd -w 5 -F eqos_forward 2>/dev/null
+		if dump=$(_eqos_ipt_save_retry "$save_cmd"); then
+			printf '%s\n' "$dump" | grep -q '^-A eqos_forward ' || return 0
+		else
+			[ "$critical" = 1 ] || return 0
+		fi
+		[ "$_try" -lt 3 ] && sleep 0.1 2>/dev/null
+	done
+	logger -t eqosplus "WARN ${cmd} eqos_forward not empty after flush+retry" 2>/dev/null
+	return 1
+}
+
 eqos_teardown_conn_table_ipt() {
+	local rc=0
 	iptables  -w 5 -D FORWARD -j eqos_forward 2>/dev/null
 	ip6tables -w 5 -D FORWARD -j eqos_forward 2>/dev/null
-	iptables  -w 5 -F eqos_forward 2>/dev/null
+	_eqos_ipt_flush_chain_verified iptables  || rc=1
+	_eqos_ipt_flush_chain_verified ip6tables || rc=1
 	iptables  -w 5 -X eqos_forward 2>/dev/null
-	ip6tables -w 5 -F eqos_forward 2>/dev/null
 	ip6tables -w 5 -X eqos_forward 2>/dev/null
 	# Destroy any leftover ipsets
 	local s
 	for s in $(ipset list -name 2>/dev/null | grep '^eqos_bypass'); do
 		ipset destroy "$s" 2>/dev/null
 	done
+	return $rc
+}
+
+# Second line of defense for the START path only. teardown's verified flush
+# can still fail under sustained contention; this re-flushes any residual
+# BEFORE init/start_network append onto the chain. NOT called from
+# conn_reload (there the chain legitimately holds rules; flushing it every
+# reload would needlessly reset counters — conn_reload's own purge-rebuild
+# handles correctness). nft: teardown deletes the whole table atomically,
+# so there is no dirty-chain-append hazard -> no-op.
+eqos_force_clean_conn_table_ipt() {
+	# Unconditional verified flush per family. _eqos_ipt_flush_chain_verified
+	# uses a non-locking *-save to confirm emptiness, and a missing chain
+	# trivially verifies clean (no -A lines) — so no lock-taking -nL gate.
+	_eqos_ipt_flush_chain_verified iptables
+	_eqos_ipt_flush_chain_verified ip6tables
 	return 0
 }
 
@@ -578,15 +664,19 @@ eqos_purge_conn_for_network_ipt() {
 # real failures (e.g. missing kernel module, ENOENT).
 _eqos_ipt_save_retry() {
 	local cmd=$1 out rc _try
-	for _try in 1 2 3; do
+	for _try in 1 2 3 4 5; do
 		out=$("$cmd" 2>/dev/null)
 		rc=$?
 		if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
 			printf '%s\n' "$out"
 			return 0
 		fi
-		[ "$_try" -lt 3 ] && sleep 0.05 2>/dev/null
+		[ "$_try" -lt 5 ] && sleep 0.1 2>/dev/null
 	done
+	# Exhausted: empty/failed output. Callers MUST check this exit status —
+	# treating a missed dump as "nothing to delete" is what accumulated
+	# duplicate REJECT rules (del silently no-ops, add then duplicates).
+	logger -t eqosplus "WARN ${cmd} empty after 5 tries (xtables-lock/EAGAIN); delete treated as failed" 2>/dev/null
 	return 1
 }
 
@@ -596,13 +686,29 @@ _eqos_ipt_save_retry() {
 # "/* x */", some bare, some omit it entirely without -v. iptables-save always
 # emits "--comment "x"" (double-quoted, no wrapper) per rule, one rule per line
 # starting with "-A <chain>", so we can count chain index reliably.
+# Returns 0 only if, for every applicable family, the comment is verified
+# ABSENT after the delete pass. Returns 1 if the ruleset was unreadable
+# (v4: contention bug — must surface) or a matching rule survived (a -D
+# failed). Callers gate add-after-delete on this so a missed delete never
+# turns into a duplicate.
+#
+# v4/v6 asymmetry: iptables-save is always available on a real fw3/iptables
+# system, so an unreadable v4 dump means lock contention -> fail. v6 may be
+# genuinely absent (IPv4-only kernel: ip6tables-save errors); an unreadable
+# v6 dump is tolerated because eqos_add_conn_ipt's v6 -A also fails there,
+# so no v6 duplicate can accrue. A POSITIVE v6 residual is still a failure.
 _eqos_ipt_delete_by_comment() {
 	local comment=$1
-	[ -n "$comment" ] || return
-	local cmd save_cmd lns ln
+	[ -n "$comment" ] || return 1
+	local cmd save_cmd dump lns ln rc=0 critical
 	for cmd in iptables ip6tables; do
 		save_cmd="${cmd}-save"
-		lns=$(_eqos_ipt_save_retry "$save_cmd" | awk -v c="$comment" '
+		[ "$cmd" = iptables ] && critical=1 || critical=0
+		if ! dump=$(_eqos_ipt_save_retry "$save_cmd"); then
+			[ "$critical" = 1 ] && rc=1
+			continue
+		fi
+		lns=$(printf '%s\n' "$dump" | awk -v c="$comment" '
 			/^-A eqos_forward / {
 				idx++
 				if (index($0, "--comment \"" c "\"")) print idx
@@ -611,21 +717,38 @@ _eqos_ipt_delete_by_comment() {
 		for ln in $lns; do
 			$cmd -w 5 -D eqos_forward "$ln" 2>/dev/null
 		done
+		if dump=$(_eqos_ipt_save_retry "$save_cmd"); then
+			if printf '%s\n' "$dump" | grep -qF -- "--comment \"${comment}\""; then
+				logger -t eqosplus "WARN residual '$comment' in ${cmd} eqos_forward after delete" 2>/dev/null
+				rc=1
+			fi
+		else
+			[ "$critical" = 1 ] && rc=1
+		fi
 	done
-	return 0
+	return $rc
 }
 
 # Delete rules whose comment STARTS WITH $1 (prefix substring within --comment).
 # Caller must include a trailing delimiter in $1 ('[' for per-rule, ':' for
 # bypass) so e.g. "eqos:rule:lan[" won't collide with "eqos:rule:lan2[" — the
 # differentiating character anchors the prefix match.
+# Same return contract / v4-v6 asymmetry as _eqos_ipt_delete_by_comment,
+# but matches a comment PREFIX. Used by the conn_reload purge-then-rebuild
+# path (eqos_purge_all_conn) — its 0/1 result decides whether the rebuild
+# is allowed to add (purge must be verified clean first, else duplicates).
 _eqos_ipt_purge_by_prefix() {
 	local prefix=$1
-	[ -n "$prefix" ] || return
-	local cmd save_cmd lns ln
+	[ -n "$prefix" ] || return 1
+	local cmd save_cmd dump lns ln rc=0 critical
 	for cmd in iptables ip6tables; do
 		save_cmd="${cmd}-save"
-		lns=$(_eqos_ipt_save_retry "$save_cmd" | awk -v p="$prefix" '
+		[ "$cmd" = iptables ] && critical=1 || critical=0
+		if ! dump=$(_eqos_ipt_save_retry "$save_cmd"); then
+			[ "$critical" = 1 ] && rc=1
+			continue
+		fi
+		lns=$(printf '%s\n' "$dump" | awk -v p="$prefix" '
 			/^-A eqos_forward / {
 				idx++
 				if (index($0, "--comment \"" p)) print idx
@@ -634,8 +757,16 @@ _eqos_ipt_purge_by_prefix() {
 		for ln in $lns; do
 			$cmd -w 5 -D eqos_forward "$ln" 2>/dev/null
 		done
+		if dump=$(_eqos_ipt_save_retry "$save_cmd"); then
+			if printf '%s\n' "$dump" | grep -qF -- "--comment \"${prefix}"; then
+				logger -t eqosplus "WARN residual prefix '$prefix' in ${cmd} eqos_forward after purge" 2>/dev/null
+				rc=1
+			fi
+		else
+			[ "$critical" = 1 ] && rc=1
+		fi
 	done
-	return 0
+	return $rc
 }
 
 # ---- Backend dispatch ------------------------------------------------------
@@ -644,9 +775,15 @@ _eqos_ipt_purge_by_prefix() {
 
 eqos_init_conn_table()       { case "$EQOS_BACKEND" in nft) eqos_init_conn_table_nft;;       iptables) eqos_init_conn_table_ipt;;       esac; }
 eqos_teardown_conn_table()   { case "$EQOS_BACKEND" in nft) eqos_teardown_conn_table_nft;;   iptables) eqos_teardown_conn_table_ipt;;   esac; }
+eqos_force_clean_conn_table(){ case "$EQOS_BACKEND" in iptables) eqos_force_clean_conn_table_ipt;; *) return 0 ;; esac; }
 eqos_init_conn_network()     { case "$EQOS_BACKEND" in nft) eqos_init_conn_network_nft "$@"; ;; iptables) eqos_init_conn_network_ipt "$@"; ;; esac; }
 eqos_teardown_conn_network() { case "$EQOS_BACKEND" in nft) eqos_teardown_conn_network_nft "$@"; ;; iptables) eqos_teardown_conn_network_ipt "$@"; ;; esac; }
 eqos_update_bypass_set()     { case "$EQOS_BACKEND" in nft) eqos_update_bypass_set_nft "$@"; ;; iptables) eqos_update_bypass_set_ipt "$@"; ;; esac; }
 eqos_add_conn()              { case "$EQOS_BACKEND" in nft) eqos_add_conn_nft "$@"; ;;          iptables) eqos_add_conn_ipt "$@"; ;;          esac; }
 eqos_del_conn()              { case "$EQOS_BACKEND" in nft) eqos_del_conn_nft "$@"; ;;          iptables) eqos_del_conn_ipt "$@"; ;;          esac; }
 eqos_purge_conn_for_network(){ case "$EQOS_BACKEND" in nft) eqos_purge_conn_for_network_nft "$@"; ;; iptables) eqos_purge_conn_for_network_ipt "$@"; ;; esac; }
+# Wipe ALL per-rule connlimit entries (every "eqos:rule:" comment, all
+# networks + any orphans). Returns non-zero if the purge could not be
+# verified clean — conn_reload's purge-then-rebuild relies on this so it
+# only re-adds onto a confirmed-empty chain (structurally zero-duplicate).
+eqos_purge_all_conn()        { case "$EQOS_BACKEND" in nft) _eqos_nft_purge_by_prefix "eqos:rule:"; ;; iptables) _eqos_ipt_purge_by_prefix "eqos:rule:"; ;; *) return 0 ;; esac; }

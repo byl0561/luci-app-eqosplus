@@ -657,15 +657,29 @@ eqos_purge_conn_for_network_ipt() {
 # to size mismatch. libiptc-legacy does NOT retry — empty stdout silently
 # breaks any caller piping through awk/grep, causing missed deletions and
 # accumulating duplicate rules over time.
+#
+# CRITICAL: always scope the dump to `-t filter` (our eqos_forward chain
+# lives only there; raw/mangle/nat are never needed). The EAGAIN race
+# window scales with table size: on the very PCDN-suppression box this
+# tool targets, the throttled 网心云 host punches ~770 UPnP mappings, so
+# miniupnpd churns a HUGE nat table near-continuously. A full-table
+# iptables-save then loses the SO_GET_INFO→SO_GET_ENTRIES race on almost
+# every try, exhausting all 5 retries — which made eqos_del_conn /
+# eqos_purge_all_conn report "failed" forever (del_id loops keeping the
+# IDLIST entry → conn_reload resurrects the stale rule → duplicate REJECT;
+# add_ip's clear-before-add fails → the rate-limit rule never commits).
+# `-t filter` collapses the dump to the tiny, stable filter table so the
+# race window is back to microseconds. (eqosplusctrl's sanity probe was
+# already scoped this way; the mutation paths must match.)
 # Note: -w is NOT a valid flag for iptables-save in iptables-legacy (not
 # in its getopt string). iptables-save bypasses xtables.lock entirely.
-# Tuning: race window is typically microseconds; 3 tries × 50ms backoff
-# tolerates concurrent committers (openclash, miniupnpd) without masking
-# real failures (e.g. missing kernel module, ENOENT).
+# Tuning: 5 tries × 100ms backoff tolerates concurrent committers
+# (openclash, miniupnpd) without masking real failures (missing kernel
+# module, ENOENT).
 _eqos_ipt_save_retry() {
 	local cmd=$1 out rc _try
 	for _try in 1 2 3 4 5; do
-		out=$("$cmd" 2>/dev/null)
+		out=$("$cmd" -t filter 2>/dev/null)
 		rc=$?
 		if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
 			printf '%s\n' "$out"

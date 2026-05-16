@@ -1344,4 +1344,23 @@ else
 		conn_has_bypass_for "eqotest_b"
 fi
 
+echo ""
+echo "-- iptables-save scope (regression: PCDN nat-churn EAGAIN) --"
+# The full-table iptables-save EAGAIN failure can't be reproduced
+# deterministically (it needs a huge, continuously-churned nat table to
+# lose the SO_GET_INFO->SO_GET_ENTRIES race). Lock the invariant
+# structurally instead: every ruleset read in the mutation paths goes
+# through _eqos_ipt_save_retry, which MUST scope the dump to `-t filter`
+# (eqos_forward lives only in the filter table; a full-table dump on a
+# PCDN box loses the race forever -> del_id loops / duplicate REJECT /
+# dead rate limit). Source grep so it runs on any host, backend or not.
+CORE_SH=/usr/lib/eqosplus/core.sh
+# Fixed-string (-F): the patterns contain $ ( ) " which we want literal.
+core_save_scoped()    { grep -qF 'out=$("$cmd" -t filter ' "$CORE_SH"; }
+core_save_full_table() { grep -qF 'out=$("$cmd" 2>'        "$CORE_SH"; }
+assert "save: _eqos_ipt_save_retry scopes dump to -t filter" \
+	core_save_scoped
+assert_fail "save: no bare full-table iptables-save in core.sh read path" \
+	core_save_full_table
+
 test_report

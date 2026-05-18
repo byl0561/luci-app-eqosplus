@@ -751,6 +751,14 @@ assert "sched: weekend on Saturday" check_item "test" "00:00" "00:00" "6,7" "12"
 assert "sched: weekend on Sunday" check_item "test" "00:00" "00:00" "6,7" "12" "00" "7"
 assert_fail "sched: weekend on Monday" check_item "test" "00:00" "00:00" "6,7" "12" "00" "1"
 
+# conn_reload schedule gate (regression: _reapply_conn_for_active_rules must
+# SKIP a scheduled-INACTIVE IDLIST entry instead of resurrecting it).
+# Reproduce the screenshot windows at 10:00 Monday.
+assert_fail "sched: gate skips lan[0] peak 18:00-23:59 @10:00" \
+	check_item "lan[0]" "18:00" "23:59" "" "10" "00" "1"
+assert "sched: gate re-adds lan[1] normal 00:00-17:59 @10:00" \
+	check_item "lan[1]" "00:00" "17:59" "" "10" "00" "1"
+
 # Bug 1 fix: cross-midnight + specific weekday
 # Rule: Monday 23:00-06:00. On Tuesday 02:00, should still be active (continuation of Monday night)
 assert "sched: cross-midnight Mon 23:00-06:00 active Mon 23:30" \
@@ -1303,6 +1311,77 @@ else
 		conn_count_is "eqotest_a[7]" 0
 	assert "conn: eqos_del_conn idempotent (verified-absent -> 0)" \
 		eqos_del_conn "eqotest_a[7]"
+
+	if [ "$EQOS_BACKEND" = "iptables" ]; then
+		# Precondition guard: this branch implies legacy (backend=iptables
+		# is only chosen when no nft exists) -> ip_tables registered ->
+		# v4 _eqos_proto_active true. Catches a proc-path typo / env drift
+		# silently downgrading v4 to best-effort (silent-no-op risk).
+		assert "conn: _eqos_proto_active(iptables) true here (legacy precond)" \
+			_eqos_proto_active iptables
+
+		# Regression: del/add split crid under IFS=, and called del_id
+		# BEFORE restoring IFS. The old `for ln in $lns` then saw the
+		# multi-line rule-number list as ONE word ->
+		# `iptables -D eqos_forward "5\n4"` -> silent fail -> permanent
+		# "cleanup not verified". src+dst make lns multi-line (the trigger).
+		eqos_add_conn "eqotest_a[ifs]" "172.31.255.81" "100" "1" out
+		eqos_add_conn "eqotest_a[ifs]" "172.31.255.81" "100" "1" in
+		assert "conn: ifs precond — two lines (multi-line lns)" \
+			conn_count_is "eqotest_a[ifs]" 2
+		del_under_comma_ifs() {
+			local _oifs="$IFS" _rc
+			IFS=,
+			eqos_del_conn "eqotest_a[ifs]"; _rc=$?
+			IFS="$_oifs"
+			return $_rc
+		}
+		assert "conn: eqos_del_conn works under leaked IFS=, (rc 0)" \
+			del_under_comma_ifs
+		assert "conn: del under IFS=, removed BOTH lines" \
+			conn_count_is "eqotest_a[ifs]" 0
+
+		# Spec-based delete (-A -> -D) on CIDR/all-proto + idempotency.
+		eqos_add_conn "eqotest_a[spec]" "172.31.255.82/32" "200" "0" out
+		assert "conn: spec rule installed" conn_has_rule_id "eqotest_a[spec]"
+		assert "conn: eqos_del_conn (spec-based) returns 0" \
+			eqos_del_conn "eqotest_a[spec]"
+		assert_fail "conn: spec rule removed" conn_has_rule_id "eqotest_a[spec]"
+		assert "conn: eqos_del_conn idempotent absent (spec) -> 0" \
+			eqos_del_conn "eqotest_a[spec]"
+
+		# v4/v6 treated IDENTICALLY: `critical` follows _eqos_proto_active
+		# (is THAT protocol's filter table registered in the kernel), not
+		# family name. Mocks live in subshell-body functions () ( ... ) so
+		# they never leak into later tests (no unset/restore needed).
+
+		# (a) protocol OFF + dump unreadable -> tolerated (rc 0); the other
+		#     (active) protocol's rule is still deleted.
+		eqos_add_conn "eqotest_a[v6off]" "172.31.255.83" "100" "1" out
+		proto_off_del() (
+			_eqos_proto_active() { [ "$1" = iptables ]; }   # v6 OFF, v4 ON
+			ip6tables-save() { return 1; }                   # v6 unreadable
+			eqos_del_conn "eqotest_a[v6off]"
+		)
+		assert "conn: protocol-off + unreadable tolerated (rc 0)" \
+			proto_off_del
+		assert "conn: active protocol's rule still removed" \
+			conn_count_is "eqotest_a[v6off]" 0
+
+		# (b) protocol ON + dump unreadable -> lock contention, MUST fail
+		#     (never silently no-op — that was the duplicate-REJECT bug).
+		eqos_add_conn "eqotest_a[ct]" "172.31.255.84" "100" "1" out
+		proto_on_unreadable_del() (
+			_eqos_proto_active() { return 0; }   # every protocol "active"
+			iptables-save() { return 1; }        # v4 unreadable = contention
+			eqos_del_conn "eqotest_a[ct]"
+		)
+		assert_fail "conn: active proto + unreadable = fail (no silent no-op)" \
+			proto_on_unreadable_del
+		eqos_del_conn "eqotest_a[ct]" >/dev/null 2>&1
+		assert_fail "conn: ct rule cleaned up after contention test" \
+			conn_has_rule_id "eqotest_a[ct]"
+	fi
 
 	# Per-network sweep: install a rule for a similarly-named network, ensure
 	# purging "eqotest_a" doesn't touch "eqotest_b".

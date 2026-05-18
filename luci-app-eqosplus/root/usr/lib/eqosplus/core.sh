@@ -471,14 +471,40 @@ eqos_init_conn_table_ipt() {
 	ip6tables -w 5 -C FORWARD -j eqos_forward 2>/dev/null || ip6tables -w 5 -I FORWARD 1 -j eqos_forward 2>/dev/null
 }
 
+# True (0) iff this family's iptables FILTER table is registered in the
+# kernel — i.e. that protocol is actually enabled. IDENTICAL logic for v4
+# and v6 (no family-name special-case); the only difference is which proc
+# file, i.e. whether that protocol is turned on. Used to decide `critical`:
+# table registered + dump unreadable = xtables-lock contention (the bug ->
+# must surface); table NOT registered (proto/module off) = a legitimately
+# empty ruleset -> tolerate. Lock contention does NOT unregister the table,
+# so it still reads as active and the real bug is still surfaced.
+#
+# PRECONDITION: these are iptables-legacy x_tables proc interfaces.
+# EQOS_BACKEND=iptables is chosen only when no nft binary exists (backend
+# autodetect / uci-defaults prefer nft) -> the system is iptables-legacy,
+# where these files exist. The bug this critical flag guards (iptables-save
+# two-syscall EAGAIN race) is itself legacy-only (see _eqos_ipt_save_retry);
+# an iptables-nft compat layer has neither the race nor these proc files
+# and never reaches this path in a correctly-detected setup. A hand-forced
+# backend=iptables on a pure nft-compat box (no nft binary) is out of scope.
+_eqos_proto_active() {
+	case "$1" in
+		iptables)  grep -qx filter /proc/net/ip_tables_names  2>/dev/null ;;
+		ip6tables) grep -qx filter /proc/net/ip6_tables_names 2>/dev/null ;;
+		*) return 1 ;;
+	esac
+}
+
 # Flush one family's eqos_forward and VERIFY it is actually empty, retrying
 # on transient lock contention. Without this, a -F that lost the xtables
 # lock left a dirty chain that init then appended onto -> duplicate REJECTs.
-# $1 = iptables|ip6tables. v4 unverifiable-under-contention => fail (the
-# real bug); v6 unreadable tolerated (IPv4-only kernels).
+# $1 = iptables|ip6tables. critical via _eqos_proto_active (same v4/v6
+# rule): protocol's filter table registered + unverifiable after retry =
+# lock contention = fail; protocol off -> tolerate.
 _eqos_ipt_flush_chain_verified() {
 	local cmd=$1 save_cmd="${1}-save" dump _try critical
-	[ "$cmd" = iptables ] && critical=1 || critical=0
+	_eqos_proto_active "$cmd" && critical=1 || critical=0
 	for _try in 1 2 3; do
 		$cmd -w 5 -F eqos_forward 2>/dev/null
 		if dump=$(_eqos_ipt_save_retry "$save_cmd"); then
@@ -698,46 +724,71 @@ _eqos_ipt_save_retry() {
 # We use iptables-save (stable, machine-readable output) instead of iptables -L
 # because -L's rendering of -m comment varies across builds: some show
 # "/* x */", some bare, some omit it entirely without -v. iptables-save always
-# emits "--comment "x"" (double-quoted, no wrapper) per rule, one rule per line
-# starting with "-A <chain>", so we can count chain index reliably.
+# emits "--comment "x"" (double-quoted) per rule, one rule per line starting
+# with "-A <chain>", so each matching rule is deleted by its FULL SPEC
+# (-A -> -D) — no line-number/handle dependency, no IFS dependency.
 # Returns 0 only if, for every applicable family, the comment is verified
 # ABSENT after the delete pass. Returns 1 if the ruleset was unreadable
-# (v4: contention bug — must surface) or a matching rule survived (a -D
-# failed). Callers gate add-after-delete on this so a missed delete never
-# turns into a duplicate.
+# while that protocol is enabled (lock-contention bug — must surface) or a
+# matching rule survived (a -D failed). Callers gate add-after-delete on
+# this so a missed delete never turns into a duplicate.
 #
-# v4/v6 asymmetry: iptables-save is always available on a real fw3/iptables
-# system, so an unreadable v4 dump means lock contention -> fail. v6 may be
-# genuinely absent (IPv4-only kernel: ip6tables-save errors); an unreadable
-# v6 dump is tolerated because eqos_add_conn_ipt's v6 -A also fails there,
-# so no v6 duplicate can accrue. A POSITIVE v6 residual is still a failure.
+# v4/v6 are treated IDENTICALLY (see _eqos_proto_active): `critical` is
+# decided by whether THAT protocol's filter table is registered in the
+# kernel, not by family name. Protocol enabled + unreadable dump = lock
+# contention -> fail. Protocol off (no ip{,6}_tables) -> tolerated (its -A
+# fails too, no dup can accrue). A POSITIVE residual always fails.
 _eqos_ipt_delete_by_comment() {
 	local comment=$1
 	[ -n "$comment" ] || return 1
-	local cmd save_cmd dump lns ln rc=0 critical
+	local cmd save_cmd dump line rc=0 critical _try _residual
 	for cmd in iptables ip6tables; do
 		save_cmd="${cmd}-save"
-		[ "$cmd" = iptables ] && critical=1 || critical=0
-		if ! dump=$(_eqos_ipt_save_retry "$save_cmd"); then
-			[ "$critical" = 1 ] && rc=1
-			continue
-		fi
-		lns=$(printf '%s\n' "$dump" | awk -v c="$comment" '
-			/^-A eqos_forward / {
-				idx++
-				if (index($0, "--comment \"" c "\"")) print idx
-			}
-		' | sort -rn)
-		for ln in $lns; do
-			$cmd -w 5 -D eqos_forward "$ln" 2>/dev/null
-		done
-		if dump=$(_eqos_ipt_save_retry "$save_cmd"); then
-			if printf '%s\n' "$dump" | grep -qF -- "--comment \"${comment}\""; then
-				logger -t eqosplus "WARN residual '$comment' in ${cmd} eqos_forward after delete" 2>/dev/null
-				rc=1
+		# critical iff this protocol's filter table is registered in the
+		# kernel (see _eqos_proto_active) — IDENTICAL test for v4 and v6,
+		# no family-name special-case. Registered + unreadable dump = lock
+		# contention (the bug -> fail); protocol off -> tolerate (its -A
+		# fails too, no rule can accrue). A POSITIVE residual always fails.
+		_eqos_proto_active "$cmd" && critical=1 || critical=0
+		# Up to 3 passes: re-dump fresh, delete every matching rule by
+		# FULL SPEC (-A -> -D) — immune to nft handle / line-number drift
+		# and independent of the caller's IFS (the IFS=, leak that fed
+		# every rule number to one bogus `iptables -D` arg). Done when the
+		# comment is gone from the eqos_forward chain.
+		_residual=1
+		for _try in 1 2 3; do
+			if ! dump=$(_eqos_ipt_save_retry "$save_cmd"); then
+				# v4 unreadable = contention bug, keep failing; v6
+				# unreadable = tolerated (no v6 rule can exist anyway).
+				[ "$critical" = 1 ] || { _residual=0; break; }
+				[ "$_try" -lt 3 ] && sleep 0.1 2>/dev/null
+				continue
 			fi
-		else
-			[ "$critical" = 1 ] && rc=1
+			# printf|while subshell is fine: -D is a kernel side effect,
+			# nothing returned. IFS= so a leaked IFS cannot merge lines.
+			printf '%s\n' "$dump" | while IFS= read -r line; do
+				case "$line" in "-A eqos_forward "*) ;; *) continue ;; esac
+				case "$line" in *"--comment \"${comment}\""*) ;; *) continue ;; esac
+				# spec is our own injected rule read back; comment is
+				# eqos:rule:<net>[<idx>] (net [a-z0-9_], idx digits) — no
+				# shell metacharacters, eval is controlled.
+				eval "$cmd -w 2 -D eqos_forward ${line#-A eqos_forward }" 2>/dev/null
+			done
+			if dump=$(_eqos_ipt_save_retry "$save_cmd"); then
+				if printf '%s\n' "$dump" | grep -F -- '-A eqos_forward ' | grep -qF -- "--comment \"${comment}\""; then
+					_residual=1
+				else
+					_residual=0; break
+				fi
+			else
+				# verify dump unreadable: same v4/v6 rule as above.
+				[ "$critical" = 1 ] || { _residual=0; break; }
+			fi
+			[ "$_try" -lt 3 ] && sleep 0.1 2>/dev/null
+		done
+		if [ "$_residual" != 0 ]; then
+			logger -t eqosplus "WARN residual '$comment' in ${cmd} eqos_forward after delete+retry" 2>/dev/null
+			rc=1
 		fi
 	done
 	return $rc
@@ -754,30 +805,38 @@ _eqos_ipt_delete_by_comment() {
 _eqos_ipt_purge_by_prefix() {
 	local prefix=$1
 	[ -n "$prefix" ] || return 1
-	local cmd save_cmd dump lns ln rc=0 critical
+	local cmd save_cmd dump line rc=0 critical _try _residual
 	for cmd in iptables ip6tables; do
 		save_cmd="${cmd}-save"
-		[ "$cmd" = iptables ] && critical=1 || critical=0
-		if ! dump=$(_eqos_ipt_save_retry "$save_cmd"); then
-			[ "$critical" = 1 ] && rc=1
-			continue
-		fi
-		lns=$(printf '%s\n' "$dump" | awk -v p="$prefix" '
-			/^-A eqos_forward / {
-				idx++
-				if (index($0, "--comment \"" p)) print idx
-			}
-		' | sort -rn)
-		for ln in $lns; do
-			$cmd -w 5 -D eqos_forward "$ln" 2>/dev/null
-		done
-		if dump=$(_eqos_ipt_save_retry "$save_cmd"); then
-			if printf '%s\n' "$dump" | grep -qF -- "--comment \"${prefix}"; then
-				logger -t eqosplus "WARN residual prefix '$prefix' in ${cmd} eqos_forward after purge" 2>/dev/null
-				rc=1
+		# critical via _eqos_proto_active — IDENTICAL v4/v6 rule, see
+		# _eqos_ipt_delete_by_comment.
+		_eqos_proto_active "$cmd" && critical=1 || critical=0
+		_residual=1
+		for _try in 1 2 3; do
+			if ! dump=$(_eqos_ipt_save_retry "$save_cmd"); then
+				[ "$critical" = 1 ] || { _residual=0; break; }
+				[ "$_try" -lt 3 ] && sleep 0.1 2>/dev/null
+				continue
 			fi
-		else
-			[ "$critical" = 1 ] && rc=1
+			printf '%s\n' "$dump" | while IFS= read -r line; do
+				case "$line" in "-A eqos_forward "*) ;; *) continue ;; esac
+				case "$line" in *"--comment \"${prefix}"*) ;; *) continue ;; esac
+				eval "$cmd -w 2 -D eqos_forward ${line#-A eqos_forward }" 2>/dev/null
+			done
+			if dump=$(_eqos_ipt_save_retry "$save_cmd"); then
+				if printf '%s\n' "$dump" | grep -F -- '-A eqos_forward ' | grep -qF -- "--comment \"${prefix}"; then
+					_residual=1
+				else
+					_residual=0; break
+				fi
+			else
+				[ "$critical" = 1 ] || { _residual=0; break; }
+			fi
+			[ "$_try" -lt 3 ] && sleep 0.1 2>/dev/null
+		done
+		if [ "$_residual" != 0 ]; then
+			logger -t eqosplus "WARN residual prefix '$prefix' in ${cmd} eqos_forward after purge+retry" 2>/dev/null
+			rc=1
 		fi
 	done
 	return $rc

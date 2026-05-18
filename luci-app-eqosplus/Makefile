@@ -8,7 +8,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-eqosplus
-PKG_VERSION:=legacy-2.3.5
+PKG_VERSION:=legacy-2.3.6
 PKG_RELEASE:=1
 
 LUCI_TITLE:=LuCI support for eqosplus.

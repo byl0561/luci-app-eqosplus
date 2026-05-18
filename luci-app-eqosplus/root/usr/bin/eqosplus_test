@@ -1360,7 +1360,13 @@ else
 		eqos_add_conn "eqotest_a[v6off]" "172.31.255.83" "100" "1" out
 		proto_off_del() (
 			_eqos_proto_active() { [ "$1" = iptables ]; }   # v6 OFF, v4 ON
-			ip6tables-save() { return 1; }                   # v6 unreadable
+			# Shadow the save entry point (legal name — busybox forbids
+			# `-` in function names so we can't shadow ip6tables-save):
+			# v6 dump unreadable, v4 dump real.
+			_eqos_ipt_save_retry() {
+				[ "$1" = ip6tables-save ] && return 1
+				command iptables-save -t filter 2>/dev/null
+			}
 			eqos_del_conn "eqotest_a[v6off]"
 		)
 		assert "conn: protocol-off + unreadable tolerated (rc 0)" \
@@ -1373,7 +1379,11 @@ else
 		eqos_add_conn "eqotest_a[ct]" "172.31.255.84" "100" "1" out
 		proto_on_unreadable_del() (
 			_eqos_proto_active() { return 0; }   # every protocol "active"
-			iptables-save() { return 1; }        # v4 unreadable = contention
+			# v4 dump unreadable (contention), v6 dump real.
+			_eqos_ipt_save_retry() {
+				[ "$1" = iptables-save ] && return 1
+				command ip6tables-save -t filter 2>/dev/null
+			}
 			eqos_del_conn "eqotest_a[ct]"
 		)
 		assert_fail "conn: active proto + unreadable = fail (no silent no-op)" \
